@@ -177,7 +177,7 @@ benchmark/llava_bench/mme_pack
 tmp*.txt
 
 # Plots
-*.png
+# *.png
 *.pdf
 
 # personnal
