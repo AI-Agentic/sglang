@@ -472,16 +472,26 @@ class InternVisionModel(PreTrainedModel):
         )
 
 
+
+
 class InternVLChatModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         use_flash_attn=True,
+        pruning_fn=None,
+        pruning_ratio=0.5,
+        max_tokens=256,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
+
+        # self.pruning_fn = pruning_fn if pruning_fn is not None else self.similarity_token_pruning
+        self.pruning_fn = pruning_fn if pruning_fn is not None else self.diversity_token_pruning
+        self.pruning_ratio = pruning_ratio
+        self.max_tokens = max_tokens
 
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
@@ -550,6 +560,70 @@ class InternVLChatModel(nn.Module):
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
+    @staticmethod
+    def similarity_token_pruning(vit_embeds, pruning_ratio, token_limit):
+        """
+        Prune tokens based on similarity to the mean embedding.
+        vit_embeds: (B, N, C)
+        pruning_ratio: float (0, 1]
+        token_limit: int
+        Returns: (B, kept_tokens, C)
+        """
+        import torch.nn.functional as F  # import here or at the top
+
+        B, N, C = vit_embeds.shape
+        tokens_to_keep = min(int(N * pruning_ratio), token_limit)
+        tokens_to_keep = max(1, tokens_to_keep)
+
+        ref = vit_embeds.mean(dim=1, keepdim=True)  # (B, 1, C)
+        sim = F.cosine_similarity(vit_embeds, ref, dim=-1)  # (B, N)
+        topk_indices = torch.topk(sim, k=tokens_to_keep, dim=1).indices  # (B, kept)
+        pruned = torch.stack([
+            vit_embeds[i, topk_indices[i]]
+            for i in range(B)
+        ], dim=0)
+        return pruned
+
+    @staticmethod
+    def diversity_token_pruning(vit_embeds, pruning_ratio, token_limit):
+        """
+        Prune tokens by maximizing diversity between kept tokens.
+        vit_embeds: (B, N, C)
+        pruning_ratio: float (0, 1]
+        token_limit: int
+        Returns: (B, kept_tokens, C)
+        """
+        B, N, C = vit_embeds.shape
+        device = vit_embeds.device
+        tokens_to_keep = min(int(N * pruning_ratio), token_limit)
+        tokens_to_keep = max(1, tokens_to_keep)
+
+        print(f"[Pruning] Number of tokens before pruning: {N}")
+
+
+        pruned_list = []
+        for i in range(B):
+            tokens = vit_embeds[i]  # (N, C)
+            # Start by randomly picking the first token
+            selected = [torch.randint(0, N, (1,)).item()]
+            while len(selected) < tokens_to_keep:
+                selected_tokens = tokens[selected]  # (num_selected, C)
+                # Compute cosine similarity to selected tokens
+                sim = F.cosine_similarity(tokens.unsqueeze(1), selected_tokens.unsqueeze(0), dim=-1)  # (N, num_selected)
+                min_sim, _ = sim.max(dim=1)  # (N,) - how similar is each token to the selected set
+                min_sim[selected] = -2  # exclude already selected tokens by setting to very low value
+                # Select the token least similar to the already selected ones (most diverse)
+                idx = min_sim.argmin().item()
+                selected.append(idx)
+            # Now gather selected tokens
+            selected = torch.tensor(selected, device=device)
+            pruned_tokens = tokens[selected]  # (tokens_to_keep, C)
+            pruned_list.append(pruned_tokens)
+
+        pruned_vit_embeds = torch.stack(pruned_list, dim=0)  # (B, kept_tokens, C)
+        print(f"[Pruning] Number of tokens after pruning: {pruned_vit_embeds.shape[1]}")
+        return pruned_vit_embeds
+
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
             vit_embeds = self.vision_model(
@@ -560,6 +634,12 @@ class InternVLChatModel(nn.Module):
                 pixel_values=pixel_values, output_hidden_states=True, return_dict=True
             ).hidden_states[self.select_layer]
         vit_embeds = vit_embeds[:, 1:, :]
+
+        # <-- This is the place to prune tokens before reshaping/pixel_shuffle
+        # === Pruning step ===
+        if self.pruning_fn is not None and self.pruning_ratio < 1.0:
+            vit_embeds = self.pruning_fn(vit_embeds, self.pruning_ratio, self.max_tokens)
+
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
