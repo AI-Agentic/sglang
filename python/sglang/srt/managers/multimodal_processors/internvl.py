@@ -215,8 +215,9 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
         items = [MultimodalDataItem(pixel_values=pixel_values, modality=Modality.IMAGE)]
 
         if self.token_pruning is not None:
-            alg = self.token_pruning.alg
-            ratio = self.token_pruning.ratio
+            print("self.token_pruning", self.token_pruning)
+            alg = self.token_pruning['alg']
+            ratio = self.token_pruning['ratio']
             if alg in TOKEN_LEVEL_PRUNING_ALG:
                 token_num_per_image = int(self.num_image_token * ratio) * num_patches
             elif alg in PATCH_LEVEL_PRUNING_ALG:
