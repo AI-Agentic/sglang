@@ -28,6 +28,7 @@ from sglang.srt.hf_transformers_utils import (
     get_hf_text_config,
 )
 from sglang.srt.layers.quantization import QUANTIZATION_METHODS
+from sglang.srt.layers.token_pruning import TOKEN_PRUNING_SUPPORTED_MODELS
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_bool_env_var, is_hip
 
@@ -53,11 +54,13 @@ class ModelConfig:
         quantization: Optional[str] = None,
         override_config_file: Optional[str] = None,
         is_draft_model: bool = False,
+        token_pruning: Optional[dict] = None,
     ) -> None:
 
         self.model_path = model_path
         self.revision = revision
         self.quantization = quantization
+        self.token_pruning = token_pruning
 
         # Parse args
         self.maybe_pull_model_tokenizer_from_remote()
@@ -215,8 +218,15 @@ class ModelConfig:
         self.num_hidden_layers = self.hf_text_config.num_hidden_layers
         self.vocab_size = self.hf_text_config.vocab_size
 
-        # Verify quantization
+        # Verify quantization and token pruning
         self._verify_quantization()
+        self._verify_token_pruning()
+
+        # inject token pruning config into hf_config
+        if self.token_pruning is not None:
+            self.hf_config.__dict__.update({
+                "token_pruning": self.token_pruning
+            })
 
         # Cache attributes
         self.hf_eos_token_id = self.get_hf_eos_token_id()
@@ -240,6 +250,10 @@ class ModelConfig:
             enable_multimodal=server_args.enable_multimodal,
             dtype=server_args.dtype,
             quantization=server_args.quantization,
+            token_pruning=None if server_args.token_pruning_alg is None else {
+                    "alg":  server_args.token_pruning_alg, 
+                    "ratio": server_args.token_pruning_ratio
+                },
             **kwargs,
         )
 
@@ -408,6 +422,30 @@ class ModelConfig:
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.",
                     self.quantization,
+                )
+
+    def _verify_token_pruning(self) -> None:
+        if self.token_pruning is not None:
+            if self.token_pruning["ratio"] < 0.0:
+                logger.warning(
+                    f"Token pruning ratio lower than 0.0. "
+                    "Setting it to 0.0.",
+                )
+                self.token_pruning["ratio"] = 0.0
+            if self.token_pruning["ratio"] > 0.99:
+                logger.warning(
+                    f"Token pruning ratio higher than 0.99. "
+                    "Setting it to 0.99.",
+                )
+                self.token_pruning["ratio"] = 0.99
+
+            if not self.is_multimodal or self.is_multimodal_gen:
+                raise ValueError(
+                    "Token pruning is only supported for multimodal models."
+                )
+            if self.hf_config.architectures[0] not in TOKEN_PRUNING_SUPPORTED_MODELS:
+                raise  ValueError(
+                    f"Token pruning is not supported for model {self.model_path}. Supported list: {TOKEN_PRUNING_SUPPORTED_MODELS}"
                 )
 
     def get_hf_eos_token_id(self) -> Optional[Set[int]]:

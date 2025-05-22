@@ -221,6 +221,10 @@ class ServerArgs:
     disaggregation_ib_device: Optional[str] = None
     pdlb_url: Optional[str] = None
 
+    # Token Pruning for VLMs
+    token_pruning_alg: str = None
+    token_pruning_ratio: float = 0.0
+
     def __post_init__(self):
         # Expert parallelism
         if self.enable_ep_moe:
@@ -1420,6 +1424,24 @@ class ServerArgs:
             choices=["sdpa", "fa3", "triton_attn"],
             default=ServerArgs.mm_attention_backend,
             help="Set multimodal attention backend.",
+        )
+
+        # Token Pruning for VLMs
+        parser.add_argument(
+            "--token-pruning-alg",
+            type=str,
+            default=ServerArgs.token_pruning_alg,
+            choices=["tome", "visionzip", "patch-pruning"],
+            help="Token pruning algorithm for VLMs. "
+            "tome: Token Merging: Your ViT But Faster  (token level) "
+            "visionzip: VisionZip: Longer is Better but Not Necessary in Vision Language Models (token level) "
+            "patch-pruning: prune the whole patch with similarity"
+        )
+        parser.add_argument(
+            "--token-pruning-ratio",
+            type=float,
+            default=ServerArgs.token_pruning_ratio,
+            help="Token pruning ratio for VLMs. Should in [0.0, 0.99]",
         )
 
     @classmethod
