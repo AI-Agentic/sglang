@@ -12,6 +12,7 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.internvl import InternVLChatModel
 
+from sglang.srt.layers.token_pruning import TOKEN_LEVEL_PRUNING_ALG, PATCH_LEVEL_PRUNING_ALG, MIXED_PRUNING_ALG
 
 class InternVLImageProcessor(BaseMultimodalProcessor):
     models = [InternVLChatModel]
@@ -35,6 +36,8 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
         self.img_context_token_id = tokenizer.convert_tokens_to_ids(
             self.IMG_CONTEXT_TOKEN
         )
+        
+        self.token_pruning = getattr(hf_config, "token_pruning", None)
 
     @staticmethod
     def build_transform(input_size):
@@ -211,10 +214,24 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
         pixel_values = torch.cat(pixel_values, dim=0)
         items = [MultimodalDataItem(pixel_values=pixel_values, modality=Modality.IMAGE)]
 
+        if self.token_pruning is not None:
+            alg = self.token_pruning.alg
+            ratio = self.token_pruning.ratio
+            if alg in TOKEN_LEVEL_PRUNING_ALG:
+                token_num_per_image = int(self.num_image_token * ratio) * num_patches
+            elif alg in PATCH_LEVEL_PRUNING_ALG:
+                token_num_per_image = int(num_patches * ratio) * self.num_image_token
+            elif alg in MIXED_PRUNING_ALG:
+                token_num_per_image = int(self.num_image_token * ratio) * num_patches
+            else:
+                raise ValueError(f"Not categorized token pruning method: {alg}")
+        else:
+            token_num_per_image = self.num_image_token * num_patches
+
         for idx, num_patches in enumerate(num_patches_list):
             image_tokens = (
                 self.IMG_START_TOKEN
-                + self.IMG_CONTEXT_TOKEN * self.num_image_token * num_patches
+                + self.IMG_CONTEXT_TOKEN * token_num_per_image
                 + self.IMG_END_TOKEN
             )
             input_text = input_text.replace("<image>", image_tokens, 1)
