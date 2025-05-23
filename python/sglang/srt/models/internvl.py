@@ -482,7 +482,7 @@ class InternVLChatModel(nn.Module):
         use_flash_attn=True,
         pruning_fn=None,
         pruning_ratio=0.5,
-        max_tokens=256,
+        max_tokens=65536,
     ) -> None:
         super().__init__()
         self.config = config
@@ -560,85 +560,94 @@ class InternVLChatModel(nn.Module):
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    @staticmethod
-    def similarity_token_pruning(vit_embeds, pruning_ratio, token_limit):
-        """
-        Prune tokens based on similarity to the mean embedding.
-        vit_embeds: (B, N, C)
-        pruning_ratio: float (0, 1]
-        token_limit: int
-        Returns: (B, kept_tokens, C)
-        """
-        import torch.nn.functional as F  # import here or at the top
 
-        B, N, C = vit_embeds.shape
-        tokens_to_keep = min(int(N * pruning_ratio), token_limit)
-        tokens_to_keep = max(1, tokens_to_keep)
 
-        ref = vit_embeds.mean(dim=1, keepdim=True)  # (B, 1, C)
-        sim = F.cosine_similarity(vit_embeds, ref, dim=-1)  # (B, N)
-        topk_indices = torch.topk(sim, k=tokens_to_keep, dim=1).indices  # (B, kept)
-        pruned = torch.stack([
-            vit_embeds[i, topk_indices[i]]
-            for i in range(B)
-        ], dim=0)
-        return pruned
+    def diversity_token_pruning(
+        vit_embeds: torch.Tensor,
+        pruning_ratio: float,
+        *,
+        verbose: bool = True,
+    ) -> torch.Tensor:
+        """
+        Select a diverse subset of ViT patch embeddings using farthest‑point sampling
+        in cosine‑similarity space.
 
-    @staticmethod
-    def diversity_token_pruning(vit_embeds, pruning_ratio, num_patches):
+        Parameters
+        ----------
+        vit_embeds : torch.Tensor
+            Patch embeddings shaped (B, N, C) where
+            B = #patches in the batch dimension to prune from,
+            N = tokens per patch (e.g. sequence length in ViT),
+            C = hidden size / embedding dimension.
+        pruning_ratio : float
+            Fraction of patches to *keep* in (0, 1].  A value ≤ 0 raises.
+        verbose : bool, optional
+            If True, prints basic debug statistics.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor shaped (⌈B·pruning_ratio⌉, N, C) containing only the
+            selected (kept) patches.  Order is deterministic.
         """
-        Prune patches by maximizing diversity between kept patches across the batch dimension.
-        vit_embeds: (B, N, C) where B is number of patches to prune from
-        pruning_ratio: float (0, 1]
-        num_patches: int - total number of patches available
-        Returns: (kept_patches, N, C)
-        """
+        if not (0.0 < pruning_ratio <= 1.0):
+            raise ValueError("pruning_ratio must be in (0, 1].")
+
+        if vit_embeds.ndim != 3:
+            raise ValueError(
+                f"vit_embeds should have shape (B, N, C); got {vit_embeds.shape}"
+            )
+
         B, N, C = vit_embeds.shape
         device = vit_embeds.device
-        patches_to_keep = int(num_patches * pruning_ratio)
-        patches_to_keep = max(1, min(patches_to_keep, B))  # Ensure we don't exceed available patches
+        k = max(1, int(torch.round(torch.tensor(B * pruning_ratio)).item()))
 
-        print(f"[Pruning] Number of patches before pruning: {B}")
-        print(f"[Pruning] Target patches to keep: {patches_to_keep}")
+        if verbose:
+            print(f"[Pruning] patches_in={B}  patches_out={k}")
+            print("B,N,C: ", B, N, C)
+            print("k,N,C: ", k, N, C)
 
-        # If we need to keep all patches, return as is
-        if patches_to_keep >= B:
-            print(f"[Pruning] Keeping all patches: {B}")
+
+        # No pruning needed
+        if k >= B:
             return vit_embeds
 
-        # Flatten each patch for similarity computation: (B, N*C)
-        flattened_patches = vit_embeds.view(B, -1)
-        
-        # Start by randomly picking the first patch
-        selected = [torch.randint(0, B, (1,)).item()]
-        
-        while len(selected) < patches_to_keep:
-            selected_patches = flattened_patches[selected]  # (num_selected, N*C)
-            
-            # Compute cosine similarity between all patches and selected patches
-            # flattened_patches: (B, N*C), selected_patches: (num_selected, N*C)
-            sim = F.cosine_similarity(
-                flattened_patches.unsqueeze(1),  # (B, 1, N*C)
-                selected_patches.unsqueeze(0),   # (1, num_selected, N*C)
-                dim=-1
-            )  # (B, num_selected)
-            
-            # For each patch, find its maximum similarity to any selected patch
-            max_sim, _ = sim.max(dim=1)  # (B,)
-            
-            # Exclude already selected patches by setting to very high value
-            max_sim[selected] = 2.0
-            
-            # Select the patch least similar to the already selected ones (most diverse)
-            idx = max_sim.argmin().item()
-            selected.append(idx)
-        
-        # Gather selected patches
-        selected = torch.tensor(selected, device=device)
-        pruned_vit_embeds = vit_embeds[selected]  # (patches_to_keep, N, C)
-        
-        print(f"[Pruning] Number of patches after pruning: {pruned_vit_embeds.shape[0]}")
-        return pruned_vit_embeds
+        # ------------------------------------------------------------------
+        #  Cosine farthest‑point sampling (FPS)
+        # ------------------------------------------------------------------
+        #   1. Flatten per‑patch tensors to (B, N*C).
+        #   2. Normalize so cosine similarity == dot product.
+        #   3. Repeatedly pick the patch least similar to anything already chosen.
+        #
+        #   Complexity: O(B·k) space‑efficient (no B×B matrix held in memory).
+        # ------------------------------------------------------------------
+        flat = F.normalize(vit_embeds.view(B, -1), dim=-1)  # (B, N*C)
+
+        # idx_selected will end up length k
+        idx_selected = torch.empty(k, dtype=torch.long, device=device)
+        # 1️⃣  seed with the most “central” patch (highest L2 norm == largest dot w/ itself),
+        #     equivalent to random but deterministic and data‑driven.
+        idx_selected[0] = flat.pow(2).sum(1).argmax()
+
+        # Keep track of each patch’s *best* similarity to anything already chosen.
+        # Initialise with +∞ so the first update always wins.
+        best_sim = torch.full((B,), float("inf"), device=device)
+
+        for i in range(1, k):
+            # Cosine similarity between all patches and the last selected one
+            sim = torch.matmul(flat, flat[idx_selected[i - 1]].unsqueeze(0).T).squeeze(1)
+            best_sim = torch.minimum(best_sim, sim)  # elementwise min (lower ⇒ more diverse)
+
+            # Never pick an already‑selected index again
+            best_sim[idx_selected[:i]] = float("inf")
+
+            # Next patch = one with *lowest* best_sim so far (most dissimilar)
+            idx_selected[i] = best_sim.argmin()
+
+        pruned = vit_embeds[idx_selected]  # (k, N, C)
+
+        return pruned
+
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
@@ -654,7 +663,7 @@ class InternVLChatModel(nn.Module):
         # <-- This is the place to prune tokens before reshaping/pixel_shuffle
         # === Pruning step ===
         if self.pruning_fn is not None and self.pruning_ratio < 1.0:
-            vit_embeds = self.pruning_fn(vit_embeds, self.pruning_ratio, self.max_tokens)
+            vit_embeds = self.pruning_fn(vit_embeds, self.pruning_ratio)
 
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
