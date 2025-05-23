@@ -566,6 +566,8 @@ class InternVLChatModel(nn.Module):
             if alg == "patch-pruning":
                 ratio = token_pruning_config["ratio"]
                 self.token_pruning = DiversityPatchPruning(ratio)
+            else:
+                self.token_pruning = DoNothing()
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:

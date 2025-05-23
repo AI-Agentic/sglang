@@ -28,7 +28,7 @@ from sglang.srt.hf_transformers_utils import (
     get_hf_text_config,
 )
 from sglang.srt.layers.quantization import QUANTIZATION_METHODS
-from sglang.srt.layers.token_pruning import TOKEN_PRUNING_SUPPORTED_MODELS
+from sglang.srt.layers.token_pruning import VLM_TOKEN_PRUNING_SUPPORTED_DICT
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_bool_env_var, is_hip
 
@@ -436,10 +436,19 @@ class ModelConfig:
                 raise ValueError(
                     "Token pruning is only supported for multimodal models."
                 )
-            if self.hf_config.architectures[0] not in TOKEN_PRUNING_SUPPORTED_MODELS:
+            if self.hf_config.architectures[0] not in VLM_TOKEN_PRUNING_SUPPORTED_DICT.keys():
+                supported_vlms = list(VLM_TOKEN_PRUNING_SUPPORTED_DICT.keys())
                 raise  ValueError(
-                    f"Token pruning is not supported for model {self.model_path}. Supported list: {TOKEN_PRUNING_SUPPORTED_MODELS}"
+                    f"Token pruning is not supported for model {self.model_path}. Supported list: {supported_vlms}"
                 )
+            else:
+                supported_alg = VLM_TOKEN_PRUNING_SUPPORTED_DICT.get(self.hf_config.architectures[0],[])
+                alg = self.token_pruning["alg"]
+                if alg not in supported_alg:
+                    raise  ValueError(
+                        f"Token pruning Alg '{alg}' is not supported for model {self.model_path}. Supported Alg:'{supported_alg}'"
+                    )
+
 
     def get_hf_eos_token_id(self) -> Optional[Set[int]]:
         eos_ids = getattr(self.hf_config, "eos_token_id", None)
