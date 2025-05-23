@@ -13,7 +13,7 @@ def encode_image(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 def call_api():
 
-    base64_image = encode_image("/data/qinghao/project/yipin/sglang/example_image.png")
+    base64_image = encode_image("./example_image.png")
     response = client.chat.completions.create(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
         messages=[

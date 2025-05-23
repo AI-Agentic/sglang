@@ -214,22 +214,23 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
         pixel_values = torch.cat(pixel_values, dim=0)
         items = [MultimodalDataItem(pixel_values=pixel_values, modality=Modality.IMAGE)]
 
-        if self.token_pruning is not None:
-            print("self.token_pruning", self.token_pruning)
-            alg = self.token_pruning['alg']
-            ratio = self.token_pruning['ratio']
-            if alg in TOKEN_LEVEL_PRUNING_ALG:
-                token_num_per_image = int(self.num_image_token * ratio) * num_patches
-            elif alg in PATCH_LEVEL_PRUNING_ALG:
-                token_num_per_image = int(num_patches * ratio) * self.num_image_token
-            elif alg in MIXED_PRUNING_ALG:
-                token_num_per_image = int(self.num_image_token * ratio) * num_patches
-            else:
-                raise ValueError(f"Not categorized token pruning method: {alg}")
-        else:
-            token_num_per_image = self.num_image_token * num_patches
 
         for idx, num_patches in enumerate(num_patches_list):
+
+            if self.token_pruning is not None:
+                alg = self.token_pruning["alg"]
+                ratio = 1 - self.token_pruning["ratio"]
+                if alg in TOKEN_LEVEL_PRUNING_ALG:
+                    token_num_per_image = int(self.num_image_token * ratio) * num_patches
+                elif alg in PATCH_LEVEL_PRUNING_ALG:
+                    token_num_per_image = int(num_patches * ratio) * self.num_image_token
+                elif alg in MIXED_PRUNING_ALG:
+                    token_num_per_image = int(self.num_image_token * ratio) * num_patches
+                else:
+                    raise ValueError(f"Not categorized token pruning method: {alg}")
+            else:
+                token_num_per_image = self.num_image_token * num_patches
+
             image_tokens = (
                 self.IMG_START_TOKEN
                 + self.IMG_CONTEXT_TOKEN * token_num_per_image

@@ -481,7 +481,6 @@ class InternVLChatModel(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         use_flash_attn=True,
         pruning_fn=None,
-        pruning_ratio=0.5,
         max_tokens=65536,
     ) -> None:
         super().__init__()
@@ -490,7 +489,9 @@ class InternVLChatModel(nn.Module):
 
         # self.pruning_fn = pruning_fn if pruning_fn is not None else self.similarity_token_pruning
         self.pruning_fn = pruning_fn if pruning_fn is not None else self.diversity_token_pruning
-        self.pruning_ratio = pruning_ratio
+        self.token_pruning = getattr(self.config, "token_pruning", None)
+        if self.token_pruning is not None:
+                self.pruning_ratio = self.token_pruning["ratio"]
         self.max_tokens = max_tokens
 
         image_size = config.force_image_size or config.vision_config.image_size
@@ -563,6 +564,7 @@ class InternVLChatModel(nn.Module):
 
 
     def diversity_token_pruning(
+        self,
         vit_embeds: torch.Tensor,
         pruning_ratio: float,
         *,
@@ -600,7 +602,7 @@ class InternVLChatModel(nn.Module):
 
         B, N, C = vit_embeds.shape
         device = vit_embeds.device
-        k = max(1, int(torch.round(torch.tensor(B * pruning_ratio)).item()))
+        k = max(1, int(B*(1 - pruning_ratio)))  # ⌈B·pruning_ratio⌉
 
         if verbose:
             print(f"[Pruning] patches_in={B}  patches_out={k}")
@@ -645,6 +647,9 @@ class InternVLChatModel(nn.Module):
             idx_selected[i] = best_sim.argmin()
 
         pruned = vit_embeds[idx_selected]  # (k, N, C)
+
+        if verbose:
+            print("shape of pruned: ", pruned.shape)
 
         return pruned
 
