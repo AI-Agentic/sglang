@@ -27,6 +27,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.token_pruning import DiversityPatchPruning, DoNothing
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     general_mm_embed_routine,
@@ -480,18 +481,12 @@ class InternVLChatModel(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         use_flash_attn=True,
-        pruning_fn=None,
         max_tokens=65536,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
 
-        # self.pruning_fn = pruning_fn if pruning_fn is not None else self.similarity_token_pruning
-        self.pruning_fn = pruning_fn if pruning_fn is not None else self.diversity_token_pruning
-        self.token_pruning = getattr(self.config, "token_pruning", None)
-        if self.token_pruning is not None:
-                self.pruning_ratio = self.token_pruning["ratio"]
         self.max_tokens = max_tokens
 
         image_size = config.force_image_size or config.vision_config.image_size
@@ -539,6 +534,7 @@ class InternVLChatModel(nn.Module):
             nn.Linear(llm_hidden_size, llm_hidden_size),
         )
 
+        self.set_token_pruning()
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
         # N, W, H, C --> N, W, H * scale, C // scale
@@ -561,98 +557,17 @@ class InternVLChatModel(nn.Module):
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-
-
-    def diversity_token_pruning(
-        self,
-        vit_embeds: torch.Tensor,
-        pruning_ratio: float,
-        *,
-        verbose: bool = True,
-    ) -> torch.Tensor:
-        """
-        Select a diverse subset of ViT patch embeddings using farthest‑point sampling
-        in cosine‑similarity space.
-
-        Parameters
-        ----------
-        vit_embeds : torch.Tensor
-            Patch embeddings shaped (B, N, C) where
-            B = #patches in the batch dimension to prune from,
-            N = tokens per patch (e.g. sequence length in ViT),
-            C = hidden size / embedding dimension.
-        pruning_ratio : float
-            Fraction of patches to *keep* in (0, 1].  A value ≤ 0 raises.
-        verbose : bool, optional
-            If True, prints basic debug statistics.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor shaped (⌈B·pruning_ratio⌉, N, C) containing only the
-            selected (kept) patches.  Order is deterministic.
-        """
-        if not (0.0 < pruning_ratio <= 1.0):
-            raise ValueError("pruning_ratio must be in (0, 1].")
-
-        if vit_embeds.ndim != 3:
-            raise ValueError(
-                f"vit_embeds should have shape (B, N, C); got {vit_embeds.shape}"
-            )
-
-        B, N, C = vit_embeds.shape
-        device = vit_embeds.device
-        k = max(1, int(B*(1 - pruning_ratio)))  # ⌈B·pruning_ratio⌉
-
-        if verbose:
-            print(f"[Pruning] patches_in={B}  patches_out={k}")
-            print("B,N,C: ", B, N, C)
-            print("k,N,C: ", k, N, C)
-
-
-        # No pruning needed
-        if k >= B:
-            return vit_embeds
-
-        # ------------------------------------------------------------------
-        #  Cosine farthest‑point sampling (FPS)
-        # ------------------------------------------------------------------
-        #   1. Flatten per‑patch tensors to (B, N*C).
-        #   2. Normalize so cosine similarity == dot product.
-        #   3. Repeatedly pick the patch least similar to anything already chosen.
-        #
-        #   Complexity: O(B·k) space‑efficient (no B×B matrix held in memory).
-        # ------------------------------------------------------------------
-        flat = F.normalize(vit_embeds.view(B, -1), dim=-1)  # (B, N*C)
-
-        # idx_selected will end up length k
-        idx_selected = torch.empty(k, dtype=torch.long, device=device)
-        # 1️⃣  seed with the most “central” patch (highest L2 norm == largest dot w/ itself),
-        #     equivalent to random but deterministic and data‑driven.
-        idx_selected[0] = flat.pow(2).sum(1).argmax()
-
-        # Keep track of each patch’s *best* similarity to anything already chosen.
-        # Initialise with +∞ so the first update always wins.
-        best_sim = torch.full((B,), float("inf"), device=device)
-
-        for i in range(1, k):
-            # Cosine similarity between all patches and the last selected one
-            sim = torch.matmul(flat, flat[idx_selected[i - 1]].unsqueeze(0).T).squeeze(1)
-            best_sim = torch.minimum(best_sim, sim)  # elementwise min (lower ⇒ more diverse)
-
-            # Never pick an already‑selected index again
-            best_sim[idx_selected[:i]] = float("inf")
-
-            # Next patch = one with *lowest* best_sim so far (most dissimilar)
-            idx_selected[i] = best_sim.argmin()
-
-        pruned = vit_embeds[idx_selected]  # (k, N, C)
-
-        if verbose:
-            print("shape of pruned: ", pruned.shape)
-
-        return pruned
-
+    def set_token_pruning(self):
+        token_pruning_config = getattr(self.config, "token_pruning", None)
+        if token_pruning_config is None:
+            self.token_pruning = DoNothing()
+        else:
+            alg = token_pruning_config["alg"]
+            if alg == "patch-pruning":
+                ratio = token_pruning_config["ratio"]
+                self.token_pruning = DiversityPatchPruning(ratio)
+            else:
+                self.token_pruning = DoNothing()
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
@@ -667,9 +582,7 @@ class InternVLChatModel(nn.Module):
 
         # <-- This is the place to prune tokens before reshaping/pixel_shuffle
         # === Pruning step ===
-        if self.pruning_fn is not None and self.pruning_ratio < 1.0:
-            vit_embeds = self.pruning_fn(vit_embeds, self.pruning_ratio)
-
+        vit_embeds = self.token_pruning.forward(vit_embeds)
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)

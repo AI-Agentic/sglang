@@ -1,6 +1,6 @@
 
 export TORCHINDUCTOR_CACHE_DIR=~/.triton
-CUDA_VISIBLE_DEVICES=7 python3 -m sglang.launch_server \
+CUDA_VISIBLE_DEVICES=4 python3 -m sglang.launch_server \
     --model-path OpenGVLab/InternVL3-1B \
     --trust-remote-code \
     --chat-template internvl-2-5 \

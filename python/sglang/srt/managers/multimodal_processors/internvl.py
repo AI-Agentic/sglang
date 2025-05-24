@@ -219,13 +219,13 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
 
             if self.token_pruning is not None:
                 alg = self.token_pruning["alg"]
-                ratio = 1 - self.token_pruning["ratio"]
+                kept_ratio = 1 - self.token_pruning["ratio"]
                 if alg in TOKEN_LEVEL_PRUNING_ALG:
-                    token_num_per_image = int(self.num_image_token * ratio) * num_patches
+                    token_num_per_image = int(self.num_image_token * kept_ratio) * num_patches
                 elif alg in PATCH_LEVEL_PRUNING_ALG:
-                    token_num_per_image = int(num_patches * ratio) * self.num_image_token
+                    token_num_per_image = int(num_patches * kept_ratio) * self.num_image_token
                 elif alg in MIXED_PRUNING_ALG:
-                    token_num_per_image = int(self.num_image_token * ratio) * num_patches
+                    token_num_per_image = int(self.num_image_token * kept_ratio) * num_patches
                 else:
                     raise ValueError(f"Not categorized token pruning method: {alg}")
             else:
