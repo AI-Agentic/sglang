@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
 ]
-dependencies = ["aiohttp", "requests", "tqdm", "numpy", "IPython", "setproctitle"]
+dependencies = ["aiohttp", "requests", "tqdm", "numpy", "IPython", "setproctitle", "sglang-router"]
 
 [project.optional-dependencies]
 runtime_common = [
