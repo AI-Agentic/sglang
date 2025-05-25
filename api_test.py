@@ -6,16 +6,16 @@ import concurrent.futures
 from tqdm import tqdm
 
 client = OpenAI(
-    base_url="http://127.0.0.1:30000/v1"
+    base_url="http://127.0.0.1:23333/v1"
 )
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 def call_api():
 
-    base64_image = encode_image("/data/qinghao/project/yipin/sglang/example_image.png")
+    base64_image = encode_image("./example_image.png")
     response = client.chat.completions.create(
-        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        model="OpenGVLab/InternVL3-8B",
         messages=[
             {
                 "role": "user",
