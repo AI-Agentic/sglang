@@ -214,6 +214,7 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
         pixel_values = torch.cat(pixel_values, dim=0)
 
 
+
         for idx, num_patches in enumerate(num_patches_list):
 
             if self.token_pruning is not None:
