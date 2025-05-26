@@ -152,9 +152,34 @@ class InternAttention(nn.Module):
         outs = self.proj_drop(outs)
         return outs
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        x = self._flash_attn(hidden_states)
-        return x
+    def _eager_attention(self, x):
+        qkv = self.qkv(x)
+        qkv = rearrange(
+            qkv, "b s (three h d) -> b s three h d", three=3, h=self.num_heads
+        )
+        q, k, v = qkv.unbind(2)
+        if self.qk_normalization:
+            q = self.q_norm(q.flatten(-2, -1)).view(q.shape)
+            k = self.k_norm(k.flatten(-2, -1)).view(k.shape)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn_weights = F.softmax(attn_weights, dim=-1) # b h s s
+
+        attn_output = torch.matmul(attn_weights, v)  # b h s d
+        outs = self.proj(rearrange(attn_output, "b h s d -> b s (h d)"))
+        outs = self.proj_drop(outs)
+
+        return outs, attn_weights, k
+
+
+    def forward(self, hidden_states: torch.Tensor, out_metric = False) -> torch.Tensor:
+        if not out_metric:
+            x = self._flash_attn(hidden_states)
+            return x, None
+        else:
+            x, attn_weights, k_metric = self._eager_attention(hidden_states)
+            return x, [attn_weights, k_metric]
 
 
 class InternVisionEmbeddings(nn.Module):
@@ -287,6 +312,7 @@ class InternVisionEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        out_metric = False,
     ) -> Tuple[
         torch.FloatTensor,
         Optional[torch.FloatTensor],
@@ -296,15 +322,17 @@ class InternVisionEncoderLayer(nn.Module):
         Args:
             hidden_states (`Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]`): input to the layer of shape `(batch, seq_len, embed_dim)`
         """
+        attn_out, metric = self.attn(self.norm1(hidden_states).to(hidden_states.dtype), out_metric)
+
         hidden_states = hidden_states + self.drop_path1(
-            self.attn(self.norm1(hidden_states).to(hidden_states.dtype)) * self.ls1
+            attn_out * self.ls1
         )
 
         hidden_states = hidden_states + self.drop_path2(
             self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2
         )
 
-        return hidden_states
+        return hidden_states, metric
 
 
 class InternVisionEncoder(nn.Module):
@@ -341,6 +369,7 @@ class InternVisionEncoder(nn.Module):
         inputs_embeds,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        return_metirc: Optional[bool] = False,
     ) -> Union[Tuple, BaseModelOutput]:
         r"""
         Args:
@@ -367,8 +396,8 @@ class InternVisionEncoder(nn.Module):
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            layer_outputs = encoder_layer(
-                hidden_states,
+            layer_outputs, metric = encoder_layer(
+                hidden_states, return_metirc
             )
             hidden_states = layer_outputs
 
@@ -508,6 +537,7 @@ class InternVLChatModel(nn.Module):
         logger.info(f"num_image_token: {self.num_image_token}")
         logger.info(f"ps_version: {self.ps_version}")
 
+        config.vision_config.__dict__.update(getattr(self.config, "token_pruning", None))
         self.vision_model = InternVisionModel(config.vision_config)
         if config.llm_config.architectures[0] == "Qwen2ForCausalLM":
             self.language_model = Qwen2ForCausalLM(
