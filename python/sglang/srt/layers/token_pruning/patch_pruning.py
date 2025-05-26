@@ -41,7 +41,7 @@ class DiversityPatchPruning:
 
         B, N, C = vit_embeds.shape
         device = vit_embeds.device
-        k = max(1, int(int(B) * self.pruning_ratio))
+        k = max(1, int(int(B) * (1 - self.pruning_ratio)))
 
         if self.verbose:
             print(f"[Pruning] patches_in={B}  patches_out={k}")
