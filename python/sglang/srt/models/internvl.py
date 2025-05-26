@@ -27,7 +27,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.token_pruning import DiversityPatchPruning, DoNothing
+from sglang.srt.layers.token_pruning import VisionZipTokenPruning, DiversityPatchPruning, DoNothing, TOKEN_PRUNIGN_NEED_METRIC_ALG
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     general_mm_embed_routine,
@@ -39,7 +39,6 @@ from sglang.srt.models.deepseek_janus_pro import DropPath
 from sglang.srt.models.internlm2 import InternLM2ForCausalLM
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 from sglang.utils import logger
-
 
 class FlashAttention(nn.Module):
     """Implement the scaled dot product attention with softmax.
@@ -139,8 +138,8 @@ class InternAttention(nn.Module):
             qkv, "b s (three h d) -> b s three h d", three=3, h=self.num_heads
         )
 
+        q, k, v = qkv.unbind(2)
         if self.qk_normalization:
-            q, k, v = qkv.unbind(2)
             q = self.q_norm(q.flatten(-2, -1)).view(q.shape)
             k = self.k_norm(k.flatten(-2, -1)).view(k.shape)
             qkv = torch.stack([q, k, v], dim=2)
@@ -170,7 +169,7 @@ class InternAttention(nn.Module):
         outs = self.proj(rearrange(attn_output, "b h s d -> b s (h d)"))
         outs = self.proj_drop(outs)
 
-        return outs, attn_weights, k
+        return outs, attn_weights, k.mean(1)
 
 
     def forward(self, hidden_states: torch.Tensor, out_metric = False) -> torch.Tensor:
@@ -363,13 +362,14 @@ class InternVisionEncoder(nn.Module):
                 for idx in range(config.num_hidden_layers)
             ]
         )
+        self._layer_idx_to_output = len(self.layers) + config.select_layer
+        self.token_pruning = getattr(config, "token_pruning", None)
 
     def forward(
         self,
         inputs_embeds,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        return_metirc: Optional[bool] = False,
     ) -> Union[Tuple, BaseModelOutput]:
         r"""
         Args:
@@ -396,10 +396,19 @@ class InternVisionEncoder(nn.Module):
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            layer_outputs, metric = encoder_layer(
-                hidden_states, return_metirc
-            )
-            hidden_states = layer_outputs
+
+            if idx == self._layer_idx_to_output:
+                return_matric = True if self.token_pruning is not None and self.token_pruning['alg'] in TOKEN_PRUNIGN_NEED_METRIC_ALG else False
+                layer_outputs, metric = encoder_layer(
+                    hidden_states, return_matric
+                )
+                hidden_states = layer_outputs
+                break
+            else:
+                layer_outputs, metric = encoder_layer(
+                    hidden_states
+                )
+                hidden_states = layer_outputs
 
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
@@ -407,7 +416,7 @@ class InternVisionEncoder(nn.Module):
         if not return_dict:
             return tuple(v for v in [hidden_states, encoder_states] if v is not None)
         return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states
+            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=metric # TODO: here we inject metric info into attention output. set its own in the future.
         )
 
 
@@ -537,7 +546,9 @@ class InternVLChatModel(nn.Module):
         logger.info(f"num_image_token: {self.num_image_token}")
         logger.info(f"ps_version: {self.ps_version}")
 
-        config.vision_config.__dict__.update(getattr(self.config, "token_pruning", None))
+        self.set_token_pruning() # token pruning have to be set before vision model init. (necessary for inject config into vision config)
+        self.config.vision_config.__dict__.update({"select_layer": self.select_layer})  # this is used for visionzip to know which layer use eager attn.
+
         self.vision_model = InternVisionModel(config.vision_config)
         if config.llm_config.architectures[0] == "Qwen2ForCausalLM":
             self.language_model = Qwen2ForCausalLM(
@@ -564,7 +575,6 @@ class InternVLChatModel(nn.Module):
             nn.Linear(llm_hidden_size, llm_hidden_size),
         )
 
-        self.set_token_pruning()
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
         # N, W, H, C --> N, W, H * scale, C // scale
@@ -595,24 +605,25 @@ class InternVLChatModel(nn.Module):
             alg = token_pruning_config["alg"]
             if alg == "patch-pruning":
                 ratio = token_pruning_config["ratio"]
-                self.token_pruning = DiversityPatchPruning(ratio, token_pruning_config["debug"])
+                self.token_pruning = DiversityPatchPruning(ratio, verbose=token_pruning_config["debug"])
+            elif alg == "visionzip":
+                ratio = token_pruning_config["ratio"]
+                self.token_pruning = VisionZipTokenPruning(ratio, downsample_ratio=self.downsample_ratio, verbose=token_pruning_config["debug"])
             else:
                 self.token_pruning = DoNothing()
 
+            self.config.vision_config.__dict__.update({"token_pruning": token_pruning_config})
+
     def extract_feature(self, pixel_values):
-        if self.select_layer == -1:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values, output_hidden_states=False, return_dict=True
-            ).last_hidden_state
-        else:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values, output_hidden_states=True, return_dict=True
-            ).hidden_states[self.select_layer]
+        vision_output = self.vision_model(pixel_values=pixel_values, output_hidden_states=False, return_dict=True)
+        vit_embeds = vision_output.last_hidden_state
+        token_pruning_metric = vision_output.attentions # None if no metric is needed.
+
         vit_embeds = vit_embeds[:, 1:, :]
 
         # <-- This is the place to prune tokens before reshaping/pixel_shuffle
         # === Pruning step ===
-        vit_embeds = self.token_pruning.forward(vit_embeds)
+        vit_embeds = self.token_pruning.forward(vit_embeds, metric = token_pruning_metric)
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)

@@ -11,8 +11,7 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
 )
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.internvl import InternVLChatModel
-
-from sglang.srt.layers.token_pruning import TOKEN_LEVEL_PRUNING_ALG, PATCH_LEVEL_PRUNING_ALG, MIXED_PRUNING_ALG
+from sglang.srt.layers.token_pruning import TOKEN_LEVEL_PRUNING_ALG, PATCH_LEVEL_PRUNING_ALG, MIXED_PRUNING_ALG, nearest_square
 
 class InternVLImageProcessor(BaseMultimodalProcessor):
     models = [InternVLChatModel]
@@ -221,7 +220,7 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
                 alg = self.token_pruning["alg"]
                 kept_ratio = 1 - self.token_pruning["ratio"]
                 if alg in TOKEN_LEVEL_PRUNING_ALG:
-                    token_num_per_image = int(self.num_image_token * kept_ratio) * num_patches
+                    token_num_per_image = nearest_square(self.num_image_token * kept_ratio) * num_patches
                 elif alg in PATCH_LEVEL_PRUNING_ALG:
                     token_num_per_image = int(num_patches * kept_ratio) * self.num_image_token
                 elif alg in MIXED_PRUNING_ALG:

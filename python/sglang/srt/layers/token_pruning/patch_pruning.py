@@ -1,6 +1,9 @@
+from typing import Iterable, List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class DiversityPatchPruning:
 
@@ -26,14 +29,16 @@ class DiversityPatchPruning:
         Tensor shaped (⌈B·pruning_ratio⌉, N, C) containing only the
         selected (kept) patches.  Order is deterministic.
     """
-    def __init__(self, pruning_ratio, verbose=False):
+    def __init__(self, 
+                 pruning_ratio:float, 
+                 verbose: Optional[bool] = False):
         super().__init__()
         if not (0.0 < pruning_ratio <= 1.0):
             raise ValueError("pruning_ratio must be in (0, 1].")
         self.pruning_ratio=pruning_ratio
         self.verbose = verbose
 
-    def forward(self, vit_embeds, *args, **kwargs):
+    def forward(self, vit_embeds:torch.Tensor, *args, **kwargs) -> torch.Tensor:
         if vit_embeds.ndim != 3:
             raise ValueError(
                 f"vit_embeds should have shape (B, N, C); got {vit_embeds.shape}"
@@ -44,9 +49,9 @@ class DiversityPatchPruning:
         k = max(1, int(int(B) * (1 - self.pruning_ratio)))
 
         if self.verbose:
-            print(f"[Pruning] patches_in={B}  patches_out={k}")
-            print("B,N,C: ", B, N, C)
-            print("k,N,C: ", k, N, C)
+            print(f"[Patch Pruning] patches_in={B}  patches_out={k}")
+            print("[Patch Pruning] B,N,C: ", B, N, C)
+            print("[Patch Pruning] k,N,C: ", k, N, C)
 
 
         # No pruning needed
