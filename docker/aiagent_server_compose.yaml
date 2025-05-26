@@ -1,0 +1,33 @@
+version: '3.9'
+
+services:
+  aiagent-sglang:
+    image: aiagent-sglang:latest
+    command: >
+      python3 -m sglang_router.launch_server
+      --model-path OpenGVLab/InternVL3-8B
+      --dp-size 4
+      --trust-remote-code
+      --chat-template internvl-2-5
+      --mem-fraction-static 0.5
+      --chunked-prefill-size 2048
+      --max-running-requests 10
+      --router-balance-rel-threshold 1.1
+      --router-balance-abs-threshold 1
+      --router-max-payload-size 10485760
+      --token-pruning-alg patch-pruning
+      --token-pruning-ratio 0.25
+    environment:
+      HF_TOKEN: <HF_TOKEN>
+    ports:
+      - "30020:30000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    shm_size: 32g
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
