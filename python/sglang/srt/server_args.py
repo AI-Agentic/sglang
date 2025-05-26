@@ -224,6 +224,7 @@ class ServerArgs:
     # Token Pruning for VLMs
     token_pruning_alg: str = None
     token_pruning_ratio: float = 0.0
+    debug_token_pruning: bool = False
 
     def __post_init__(self):
         # Expert parallelism
@@ -1442,6 +1443,11 @@ class ServerArgs:
             type=float,
             default=ServerArgs.token_pruning_ratio,
             help="Token pruning ratio for VLMs. Should in [0.0, 0.99]",
+        )
+        parser.add_argument(
+            "--debug-token-pruning",
+            action="store_true",
+            help="Enable intermediate token pruning debug information.",
         )
 
     @classmethod

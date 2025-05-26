@@ -565,7 +565,7 @@ class InternVLChatModel(nn.Module):
             alg = token_pruning_config["alg"]
             if alg == "patch-pruning":
                 ratio = token_pruning_config["ratio"]
-                self.token_pruning = DiversityPatchPruning(ratio)
+                self.token_pruning = DiversityPatchPruning(ratio, token_pruning_config["debug"])
             else:
                 self.token_pruning = DoNothing()
 
