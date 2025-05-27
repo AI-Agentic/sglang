@@ -54,26 +54,28 @@ def call_api():
     print(response.choices[0].message.content)
     return response
 
+
+def test_throughput():
+    Total_calls = 5120
+    max_workers = 5120
+
+    # Start the timer
+    start_time = time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_item = {executor.submit(call_api): i for i in range(Total_calls)}
+        for future in tqdm(concurrent.futures.as_completed(future_to_item), total=Total_calls):
+            idx = future_to_item[future]
+            try:
+                future.result()  
+            except Exception as exc:
+                print(f'Error processing sample {idx}: {exc}')
+
+
+    end_time = time.time()
+    print(f"Total time taken: {end_time - start_time:.2f} seconds")
+    request_throughput = Total_calls / (end_time - start_time)
+    print(f"Request throughput: {request_throughput:.2f} requests/second")
+
+
 response = call_api()
-
-
-
-# Total_calls = 5120
-# max_workers = 5120
-
-# # Start the timer
-# start_time = time.time()
-# with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-#     future_to_item = {executor.submit(call_api): i for i in range(Total_calls)}
-#     for future in tqdm(concurrent.futures.as_completed(future_to_item), total=Total_calls):
-#         idx = future_to_item[future]
-#         try:
-#             future.result()  
-#         except Exception as exc:
-#             print(f'Error processing sample {idx}: {exc}')
-
-
-# end_time = time.time()
-# print(f"Total time taken: {end_time - start_time:.2f} seconds")
-# request_throughput = Total_calls / (end_time - start_time)
-# print(f"Request throughput: {request_throughput:.2f} requests/second")
+# test_throughput()

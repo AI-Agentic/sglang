@@ -252,7 +252,8 @@ class ModelConfig:
             quantization=server_args.quantization,
             token_pruning=None if server_args.token_pruning_alg is None else {
                     "alg":  server_args.token_pruning_alg, 
-                    "ratio": server_args.token_pruning_ratio
+                    "ratio": server_args.token_pruning_ratio,
+                    "debug": server_args.debug_token_pruning,
                 },
             **kwargs,
         )
@@ -438,6 +439,12 @@ class ModelConfig:
                     "Setting it to 0.99.",
                 )
                 self.token_pruning["ratio"] = 0.99
+            if self.token_pruning["ratio"] == 0.0:
+                logger.warning(
+                    f"Token pruning ratio is 0.0. "
+                    "Disabling token pruning.",
+                )
+                self.token_pruning = None
 
             if not self.is_multimodal or self.is_multimodal_gen:
                 raise ValueError(
