@@ -1,12 +1,16 @@
 
 # export TORCHINDUCTOR_CACHE_DIR=~/.triton
-CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang.launch_server \
-    --model-path OpenGVLab/InternVL3-38B \
+export SGLANG_VLM_CACHE_SIZE_MB=8192
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang_router.launch_server \
+    --model-path OpenGVLab/InternVL3-8B \
     --chat-template internvl-2-5 \
-    --mem-fraction-static 0.5 \
+    --mem-fraction-static 0.6 \
     --chunked-prefill-size 2048 \
-    --max-running-requests 10 \
-    --token-pruning-alg patch-pruning \
+    --max-running-requests 100 \
+    --router-balance-rel-threshold 1.1 \
+    --router-balance-abs-threshold 1 \
+    --router-max-payload-size 10485760 \
+    --token-pruning-alg fast-patch-pruning \
     --token-pruning-ratio 0.5 \
     --debug-token-pruning \
     --trust-remote-code \
