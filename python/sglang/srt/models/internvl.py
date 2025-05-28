@@ -27,6 +27,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.layers.token_pruning import VisionZipTokenPruning, DiversityPatchPruning, DoNothing, TOKEN_PRUNIGN_NEED_METRIC_ALG
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     general_mm_embed_routine,
@@ -38,7 +39,6 @@ from sglang.srt.models.deepseek_janus_pro import DropPath
 from sglang.srt.models.internlm2 import InternLM2ForCausalLM
 from sglang.srt.models.qwen2 import Qwen2ForCausalLM
 from sglang.utils import logger
-
 
 class FlashAttention(nn.Module):
     """Implement the scaled dot product attention with softmax.
@@ -138,8 +138,8 @@ class InternAttention(nn.Module):
             qkv, "b s (three h d) -> b s three h d", three=3, h=self.num_heads
         )
 
+        q, k, v = qkv.unbind(2)
         if self.qk_normalization:
-            q, k, v = qkv.unbind(2)
             q = self.q_norm(q.flatten(-2, -1)).view(q.shape)
             k = self.k_norm(k.flatten(-2, -1)).view(k.shape)
             qkv = torch.stack([q, k, v], dim=2)
@@ -151,9 +151,34 @@ class InternAttention(nn.Module):
         outs = self.proj_drop(outs)
         return outs
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        x = self._flash_attn(hidden_states)
-        return x
+    def _eager_attention(self, x):
+        qkv = self.qkv(x)
+        qkv = rearrange(
+            qkv, "b s (three h d) -> b s three h d", three=3, h=self.num_heads
+        )
+        q, k, v = qkv.unbind(2)
+        if self.qk_normalization:
+            q = self.q_norm(q.flatten(-2, -1)).view(q.shape)
+            k = self.k_norm(k.flatten(-2, -1)).view(k.shape)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn_weights = F.softmax(attn_weights, dim=-1) # b h s s
+
+        attn_output = torch.matmul(attn_weights, v)  # b h s d
+        outs = self.proj(rearrange(attn_output, "b h s d -> b s (h d)"))
+        outs = self.proj_drop(outs)
+
+        return outs, attn_weights, k.mean(1)
+
+
+    def forward(self, hidden_states: torch.Tensor, out_metric = False) -> torch.Tensor:
+        if not out_metric:
+            x = self._flash_attn(hidden_states)
+            return x, None
+        else:
+            x, attn_weights, k_metric = self._eager_attention(hidden_states)
+            return x, [attn_weights, k_metric]
 
 
 class InternVisionEmbeddings(nn.Module):
@@ -286,6 +311,7 @@ class InternVisionEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        out_metric = False,
     ) -> Tuple[
         torch.FloatTensor,
         Optional[torch.FloatTensor],
@@ -295,15 +321,17 @@ class InternVisionEncoderLayer(nn.Module):
         Args:
             hidden_states (`Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]`): input to the layer of shape `(batch, seq_len, embed_dim)`
         """
+        attn_out, metric = self.attn(self.norm1(hidden_states).to(hidden_states.dtype), out_metric)
+
         hidden_states = hidden_states + self.drop_path1(
-            self.attn(self.norm1(hidden_states).to(hidden_states.dtype)) * self.ls1
+            attn_out * self.ls1
         )
 
         hidden_states = hidden_states + self.drop_path2(
             self.mlp(self.norm2(hidden_states).to(hidden_states.dtype)) * self.ls2
         )
 
-        return hidden_states
+        return hidden_states, metric
 
 
 class InternVisionEncoder(nn.Module):
@@ -334,6 +362,8 @@ class InternVisionEncoder(nn.Module):
                 for idx in range(config.num_hidden_layers)
             ]
         )
+        self._layer_idx_to_output = len(self.layers) + config.select_layer
+        self.token_pruning = getattr(config, "token_pruning", None)
 
     def forward(
         self,
@@ -366,10 +396,19 @@ class InternVisionEncoder(nn.Module):
         for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
-            layer_outputs = encoder_layer(
-                hidden_states,
-            )
-            hidden_states = layer_outputs
+
+            if idx == self._layer_idx_to_output:
+                return_matric = True if self.token_pruning is not None and self.token_pruning['alg'] in TOKEN_PRUNIGN_NEED_METRIC_ALG else False
+                layer_outputs, metric = encoder_layer(
+                    hidden_states, return_matric
+                )
+                hidden_states = layer_outputs
+                break
+            else:
+                layer_outputs, metric = encoder_layer(
+                    hidden_states
+                )
+                hidden_states = layer_outputs
 
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
@@ -377,7 +416,7 @@ class InternVisionEncoder(nn.Module):
         if not return_dict:
             return tuple(v for v in [hidden_states, encoder_states] if v is not None)
         return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states
+            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=metric # TODO: here we inject metric info into attention output. set its own in the future.
         )
 
 
@@ -480,17 +519,12 @@ class InternVLChatModel(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         use_flash_attn=True,
-        pruning_fn=None,
-        pruning_ratio=0.5,
-        max_tokens=256,
+        max_tokens=65536,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
 
-        # self.pruning_fn = pruning_fn if pruning_fn is not None else self.similarity_token_pruning
-        self.pruning_fn = pruning_fn if pruning_fn is not None else self.diversity_token_pruning
-        self.pruning_ratio = pruning_ratio
         self.max_tokens = max_tokens
 
         image_size = config.force_image_size or config.vision_config.image_size
@@ -511,6 +545,9 @@ class InternVLChatModel(nn.Module):
 
         logger.info(f"num_image_token: {self.num_image_token}")
         logger.info(f"ps_version: {self.ps_version}")
+
+        self.set_token_pruning() # token pruning have to be set before vision model init. (necessary for inject config into vision config)
+        self.config.vision_config.__dict__.update({"select_layer": self.select_layer})  # this is used for visionzip to know which layer use eager attn.
 
         self.vision_model = InternVisionModel(config.vision_config)
         if config.llm_config.architectures[0] == "Qwen2ForCausalLM":
@@ -560,102 +597,33 @@ class InternVLChatModel(nn.Module):
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    @staticmethod
-    def similarity_token_pruning(vit_embeds, pruning_ratio, token_limit):
-        """
-        Prune tokens based on similarity to the mean embedding.
-        vit_embeds: (B, N, C)
-        pruning_ratio: float (0, 1]
-        token_limit: int
-        Returns: (B, kept_tokens, C)
-        """
-        import torch.nn.functional as F  # import here or at the top
+    def set_token_pruning(self):
+        token_pruning_config = getattr(self.config, "token_pruning", None)
+        if token_pruning_config is None:
+            self.token_pruning = DoNothing()
+        else:
+            alg = token_pruning_config["alg"]
+            if alg == "patch-pruning":
+                ratio = token_pruning_config["ratio"]
+                self.token_pruning = DiversityPatchPruning(ratio, verbose=token_pruning_config["debug"])
+            elif alg == "visionzip":
+                ratio = token_pruning_config["ratio"]
+                self.token_pruning = VisionZipTokenPruning(ratio, downsample_ratio=self.downsample_ratio, verbose=token_pruning_config["debug"])
+            else:
+                self.token_pruning = DoNothing()
 
-        B, N, C = vit_embeds.shape
-        tokens_to_keep = min(int(N * pruning_ratio), token_limit)
-        tokens_to_keep = max(1, tokens_to_keep)
-
-        ref = vit_embeds.mean(dim=1, keepdim=True)  # (B, 1, C)
-        sim = F.cosine_similarity(vit_embeds, ref, dim=-1)  # (B, N)
-        topk_indices = torch.topk(sim, k=tokens_to_keep, dim=1).indices  # (B, kept)
-        pruned = torch.stack([
-            vit_embeds[i, topk_indices[i]]
-            for i in range(B)
-        ], dim=0)
-        return pruned
-
-    @staticmethod
-    def diversity_token_pruning(vit_embeds, pruning_ratio, num_patches):
-        """
-        Prune patches by maximizing diversity between kept patches across the batch dimension.
-        vit_embeds: (B, N, C) where B is number of patches to prune from
-        pruning_ratio: float (0, 1]
-        num_patches: int - total number of patches available
-        Returns: (kept_patches, N, C)
-        """
-        B, N, C = vit_embeds.shape
-        device = vit_embeds.device
-        patches_to_keep = int(num_patches * pruning_ratio)
-        patches_to_keep = max(1, min(patches_to_keep, B))  # Ensure we don't exceed available patches
-
-        print(f"[Pruning] Number of patches before pruning: {B}")
-        print(f"[Pruning] Target patches to keep: {patches_to_keep}")
-
-        # If we need to keep all patches, return as is
-        if patches_to_keep >= B:
-            print(f"[Pruning] Keeping all patches: {B}")
-            return vit_embeds
-
-        # Flatten each patch for similarity computation: (B, N*C)
-        flattened_patches = vit_embeds.view(B, -1)
-        
-        # Start by randomly picking the first patch
-        selected = [torch.randint(0, B, (1,)).item()]
-        
-        while len(selected) < patches_to_keep:
-            selected_patches = flattened_patches[selected]  # (num_selected, N*C)
-            
-            # Compute cosine similarity between all patches and selected patches
-            # flattened_patches: (B, N*C), selected_patches: (num_selected, N*C)
-            sim = F.cosine_similarity(
-                flattened_patches.unsqueeze(1),  # (B, 1, N*C)
-                selected_patches.unsqueeze(0),   # (1, num_selected, N*C)
-                dim=-1
-            )  # (B, num_selected)
-            
-            # For each patch, find its maximum similarity to any selected patch
-            max_sim, _ = sim.max(dim=1)  # (B,)
-            
-            # Exclude already selected patches by setting to very high value
-            max_sim[selected] = 2.0
-            
-            # Select the patch least similar to the already selected ones (most diverse)
-            idx = max_sim.argmin().item()
-            selected.append(idx)
-        
-        # Gather selected patches
-        selected = torch.tensor(selected, device=device)
-        pruned_vit_embeds = vit_embeds[selected]  # (patches_to_keep, N, C)
-        
-        print(f"[Pruning] Number of patches after pruning: {pruned_vit_embeds.shape[0]}")
-        return pruned_vit_embeds
+            self.config.vision_config.__dict__.update({"token_pruning": token_pruning_config})
 
     def extract_feature(self, pixel_values):
-        if self.select_layer == -1:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values, output_hidden_states=False, return_dict=True
-            ).last_hidden_state
-        else:
-            vit_embeds = self.vision_model(
-                pixel_values=pixel_values, output_hidden_states=True, return_dict=True
-            ).hidden_states[self.select_layer]
+        vision_output = self.vision_model(pixel_values=pixel_values, output_hidden_states=False, return_dict=True)
+        vit_embeds = vision_output.last_hidden_state
+        token_pruning_metric = vision_output.attentions # None if no metric is needed.
+
         vit_embeds = vit_embeds[:, 1:, :]
 
         # <-- This is the place to prune tokens before reshaping/pixel_shuffle
         # === Pruning step ===
-        if self.pruning_fn is not None and self.pruning_ratio < 1.0:
-            vit_embeds = self.pruning_fn(vit_embeds, self.pruning_ratio, self.max_tokens)
-
+        vit_embeds = self.token_pruning.forward(vit_embeds, metric = token_pruning_metric)
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)

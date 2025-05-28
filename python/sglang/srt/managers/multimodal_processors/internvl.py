@@ -11,8 +11,7 @@ from sglang.srt.managers.multimodal_processors.base_processor import (
 )
 from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
 from sglang.srt.models.internvl import InternVLChatModel
-
-from sglang.srt.layers.token_pruning import TOKEN_LEVEL_PRUNING_ALG, PATCH_LEVEL_PRUNING_ALG, MIXED_PRUNING_ALG
+from sglang.srt.layers.token_pruning import TOKEN_LEVEL_PRUNING_ALG, PATCH_LEVEL_PRUNING_ALG, MIXED_PRUNING_ALG, nearest_square
 
 class InternVLImageProcessor(BaseMultimodalProcessor):
     models = [InternVLChatModel]
@@ -212,24 +211,25 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
                 return None
 
         pixel_values = torch.cat(pixel_values, dim=0)
-        items = [MultimodalDataItem(pixel_values=pixel_values, modality=Modality.IMAGE)]
 
-        if self.token_pruning is not None:
-            print("self.token_pruning", self.token_pruning)
-            alg = self.token_pruning['alg']
-            ratio = self.token_pruning['ratio']
-            if alg in TOKEN_LEVEL_PRUNING_ALG:
-                token_num_per_image = int(self.num_image_token * ratio) * num_patches
-            elif alg in PATCH_LEVEL_PRUNING_ALG:
-                token_num_per_image = int(num_patches * ratio) * self.num_image_token
-            elif alg in MIXED_PRUNING_ALG:
-                token_num_per_image = int(self.num_image_token * ratio) * num_patches
-            else:
-                raise ValueError(f"Not categorized token pruning method: {alg}")
-        else:
-            token_num_per_image = self.num_image_token * num_patches
+
 
         for idx, num_patches in enumerate(num_patches_list):
+
+            if self.token_pruning is not None:
+                alg = self.token_pruning["alg"]
+                kept_ratio = 1 - self.token_pruning["ratio"]
+                if alg in TOKEN_LEVEL_PRUNING_ALG:
+                    token_num_per_image = nearest_square(self.num_image_token * kept_ratio) * num_patches
+                elif alg in PATCH_LEVEL_PRUNING_ALG:
+                    token_num_per_image = int(num_patches * kept_ratio) * self.num_image_token
+                elif alg in MIXED_PRUNING_ALG:
+                    token_num_per_image = int(self.num_image_token * kept_ratio) * num_patches
+                else:
+                    raise ValueError(f"Not categorized token pruning method: {alg}")
+            else:
+                token_num_per_image = self.num_image_token * num_patches
+
             image_tokens = (
                 self.IMG_START_TOKEN
                 + self.IMG_CONTEXT_TOKEN * token_num_per_image
@@ -238,10 +238,21 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
             input_text = input_text.replace("<image>", image_tokens, 1)
 
         tokenizer = self._processor
+        input_ids = tokenizer(input_text, return_tensors="pt")["input_ids"].flatten()
+        image_offsets = self.get_mm_items_offset(
+            input_ids=input_ids,
+            mm_token_id=self.img_context_token_id,
+        )
+        items = [
+            MultimodalDataItem(
+                pixel_values=pixel_values,
+                modality=Modality.IMAGE,
+                image_offsets=image_offsets,
+            )
+        ]
+
         return {
-            "input_ids": tokenizer(input_text, return_tensors="pt")["input_ids"]
-            .flatten()
-            .tolist(),
+            "input_ids": input_ids.tolist(),
             "mm_items": items,
             "im_start_id": self.img_start_token_id,
             "im_end_id": self.img_end_token_id,

@@ -167,15 +167,20 @@ class ServerArgs:
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
     enable_dp_lm_head: bool = False
+    enable_two_batch_overlap: bool = False
     enable_ep_moe: bool = False
     enable_deepep_moe: bool = False
     deepep_mode: Optional[Literal["auto", "normal", "low_latency"]] = "auto"
+    ep_num_redundant_experts: int = 0
     ep_dispatch_algorithm: Optional[Literal["static", "dynamic"]] = None
     init_expert_location: str = "trivial"
+    enable_eplb: bool = False
+    eplb_rebalance_num_iterations: int = 1000
     expert_distribution_recorder_mode: Optional[
         Literal["stat", "per_pass", "per_token"]
     ] = None
     expert_distribution_recorder_buffer_size: Optional[int] = None
+    enable_expert_distribution_metrics: bool = False
     deepep_config: Optional[str] = None
     enable_torch_compile: bool = False
     torch_compile_max_bs: int = 32
@@ -219,6 +224,7 @@ class ServerArgs:
     # Token Pruning for VLMs
     token_pruning_alg: str = None
     token_pruning_ratio: float = 0.0
+    debug_token_pruning: bool = False
 
     def __post_init__(self):
         # Expert parallelism
@@ -323,12 +329,6 @@ class ServerArgs:
         # Choose grammar backend
         if self.grammar_backend is None:
             self.grammar_backend = "xgrammar"
-
-        if self.pp_size > 1:
-            self.disable_overlap_schedule = True
-            logger.warning(
-                "Overlap scheduler is disabled because of using pipeline parallelism."
-            )
 
         # Data parallelism attention
         if self.enable_dp_attention:
@@ -577,6 +577,7 @@ class ServerArgs:
                 "w8a8_int8",
                 "w8a8_fp8",
                 "moe_wna16",
+                "qoq",
             ],
             help="The quantization method.",
         )
@@ -961,6 +962,7 @@ class ServerArgs:
             "--attention-backend",
             type=str,
             choices=[
+                "aiter",
                 "flashinfer",
                 "triton",
                 "torch_native",
@@ -1136,7 +1138,7 @@ class ServerArgs:
         parser.add_argument(
             "--enable-dp-attention",
             action="store_true",
-            help="Enabling data parallelism for attention and tensor parallelism for FFN. The dp size should be equal to the tp size. Currently only DeepSeek-V2 is supported.",
+            help="Enabling data parallelism for attention and tensor parallelism for FFN. The dp size should be equal to the tp size. Currently DeepSeek-V2 and Qwen 2/3 MoE models are supported.",
         )
         parser.add_argument(
             "--enable-dp-lm-head",
@@ -1147,6 +1149,11 @@ class ServerArgs:
             "--enable-ep-moe",
             action="store_true",
             help="Enabling expert parallelism for moe. The ep size is equal to the tp size.",
+        )
+        parser.add_argument(
+            "--enable-two-batch-overlap",
+            action="store_true",
+            help="Enabling two micro batches to overlap.",
         )
         parser.add_argument(
             "--enable-torch-compile",
@@ -1277,6 +1284,12 @@ class ServerArgs:
             help="Select the mode when enable DeepEP MoE, could be `normal`, `low_latency` or `auto`. Default is `auto`, which means `low_latency` for decode batch and `normal` for prefill batch.",
         )
         parser.add_argument(
+            "--ep-num-redundant-experts",
+            type=int,
+            default=ServerArgs.ep_num_redundant_experts,
+            help="Allocate this number of redundant experts in expert parallel.",
+        )
+        parser.add_argument(
             "--ep-dispatch-algorithm",
             type=str,
             default=ServerArgs.ep_dispatch_algorithm,
@@ -1289,6 +1302,17 @@ class ServerArgs:
             help="Initial location of EP experts.",
         )
         parser.add_argument(
+            "--enable-eplb",
+            action="store_true",
+            help="Enable EPLB algorithm",
+        )
+        parser.add_argument(
+            "--eplb-rebalance-num-iterations",
+            type=int,
+            default=ServerArgs.eplb_rebalance_num_iterations,
+            help="Number of iterations to automatically trigger a EPLB re-balance.",
+        )
+        parser.add_argument(
             "--expert-distribution-recorder-mode",
             type=str,
             default=ServerArgs.expert_distribution_recorder_mode,
@@ -1299,6 +1323,11 @@ class ServerArgs:
             type=int,
             default=ServerArgs.expert_distribution_recorder_buffer_size,
             help="Circular buffer size of expert distribution recorder. Set to -1 to denote infinite buffer.",
+        )
+        parser.add_argument(
+            "--enable-expert-distribution-metrics",
+            action="store_true",
+            help="Enable logging metrics for expert balancedness",
         )
         parser.add_argument(
             "--deepep-config",
@@ -1415,6 +1444,11 @@ class ServerArgs:
             default=ServerArgs.token_pruning_ratio,
             help="Token pruning ratio for VLMs. Should in [0.0, 0.99]",
         )
+        parser.add_argument(
+            "--debug-token-pruning",
+            action="store_true",
+            help="Enable intermediate token pruning debug information.",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
@@ -1438,8 +1472,6 @@ class ServerArgs:
 
         # FIXME pp constraints
         if self.pp_size > 1:
-            logger.warning(f"Turn off overlap scheule for pipeline parallelism.")
-            self.disable_overlap_schedule = True
             assert (
                 self.disable_overlap_schedule
                 and self.speculative_algorithm is None
