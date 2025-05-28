@@ -9,7 +9,7 @@ This document explains how to build, run, and test the Docker image for `aiagent
 Use the following command to build the image from `Dockerfile.aiagent`:
 
 ```bash
-docker build -f Dockerfile.aiagent -t aiagent-sglang:latest .
+docker build --no-cache -f Dockerfile.aiagent -t aiagent-sglang:latest .
 ```
 
 - `-f Dockerfile.aiagent`: Specifies the custom Dockerfile.
