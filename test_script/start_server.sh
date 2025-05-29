@@ -1,13 +1,13 @@
 
-# export TORCHINDUCTOR_CACHE_DIR=~/.triton
+export TORCHINDUCTOR_CACHE_DIR=~/.triton
 CUDA_VISIBLE_DEVICES=4 python3 -m sglang.launch_server \
     --model-path OpenGVLab/InternVL3-1B \
     --chat-template internvl-2-5 \
     --mem-fraction-static 0.2 \
-    --token-pruning-alg patch-pruning \
-    --token-pruning-ratio 0.3 \
-    --debug-token-pruning \
     --port 23333
+    # --token-pruning-alg visionzip \
+    # --token-pruning-ratio 0.3 \
+    # --debug-token-pruning \
 
 # CUDA_VISIBLE_DEVICES=1,2,3,4 python3 -m sglang_router.launch_server \
 #     --model-path OpenGVLab/InternVL3-8B \
@@ -24,15 +24,15 @@ CUDA_VISIBLE_DEVICES=4 python3 -m sglang.launch_server \
 #     --chat-template qwen2-vl \
 #     --mem-fraction-static 0.5 
 
-
-# python3 -m sglang_router.launch_server \
+# export TORCHINDUCTOR_CACHE_DIR=~/.triton
+# CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m sglang_router.launch_server \
 #     --model-path OpenGVLab/InternVL3-8B \
-#     --data-parallel-size 8 \
+#     --data-parallel-size 4 \
 #     --chat-template internvl-2-5 \
 #     --mem-fraction-static 0.7 \
-#     --port 23333
-    # --token-pruning-alg patch-pruning \
-    # --token-pruning-ratio 0.5
+#     --port 23333 \
+#     --token-pruning-alg visionzip \
+#     --token-pruning-ratio 0.5
 
 
 # python3 -m sglang_router.launch_server \

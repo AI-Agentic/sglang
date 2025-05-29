@@ -362,7 +362,7 @@ class InternVisionEncoder(nn.Module):
                 for idx in range(config.num_hidden_layers)
             ]
         )
-        self._layer_idx_to_output = len(self.layers) + config.select_layer
+        self._layer_idx_to_output = config.num_hidden_layers + config.select_layer
         self.token_pruning = getattr(config, "token_pruning", None)
 
     def forward(
