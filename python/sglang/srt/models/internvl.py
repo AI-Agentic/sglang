@@ -27,7 +27,7 @@ from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.token_pruning import VisionZipTokenPruning, DiversityPatchPruning, DoNothing, TOKEN_PRUNIGN_NEED_METRIC_ALG
+from sglang.srt.layers.token_pruning import VisionZipTokenPruning, DiversityPatchPruning, DoNothing, BigAttnTokenPruning, TOKEN_PRUNIGN_NEED_METRIC_ALG
 from sglang.srt.managers.mm_utils import (
     MultiModalityDataPaddingPatternTokenPairs,
     general_mm_embed_routine,
@@ -609,6 +609,13 @@ class InternVLChatModel(nn.Module):
             elif alg == "visionzip":
                 ratio = token_pruning_config["ratio"]
                 self.token_pruning = VisionZipTokenPruning(ratio, downsample_ratio=self.downsample_ratio, verbose=token_pruning_config["debug"])
+            elif alg == "big-attn":
+                ratio = token_pruning_config["ratio"]
+                self.token_pruning = BigAttnTokenPruning(
+                    pruning_ratio=ratio,
+                    downsample_ratio=self.downsample_ratio,
+                    verbose=token_pruning_config["debug"],
+                )
             else:
                 self.token_pruning = DoNothing()
 

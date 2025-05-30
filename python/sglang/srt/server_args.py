@@ -1432,11 +1432,12 @@ class ServerArgs:
             "--token-pruning-alg",
             type=str,
             default=ServerArgs.token_pruning_alg,
-            choices=["tome", "visionzip", "patch-pruning"],
+            choices=["tome", "visionzip", "patch-pruning", "big-attn"],
             help="Token pruning algorithm for VLMs. "
             "tome: Token Merging: Your ViT But Faster  (token level) "
             "visionzip: VisionZip: Longer is Better but Not Necessary in Vision Language Models (token level) "
             "patch-pruning: prune the whole patch with similarity"
+            "big-attn: based on attn_weight, torch.norm() and leave the biggest top-k"
         )
         parser.add_argument(
             "--token-pruning-ratio",
