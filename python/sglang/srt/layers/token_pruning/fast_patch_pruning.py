@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,7 +23,10 @@ class FastDiversityPatchPruning(nn.Module):
         self.diversity_weight = diversity_weight
         self.verbose = verbose
         
-    def forward(self, vit_embeds: torch.Tensor) -> torch.Tensor:
+    def forward(self, 
+                vit_embeds:torch.Tensor,
+                metric: Tuple[torch.Tensor, torch.Tensor]
+                ) -> torch.Tensor: 
         if vit_embeds.ndim != 3:
             raise ValueError(f"Expected shape (B, N, C), got {vit_embeds.shape}")
 
