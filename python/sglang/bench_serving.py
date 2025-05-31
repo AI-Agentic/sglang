@@ -530,6 +530,17 @@ def get_dataset(args, tokenizer):
             fixed_output_len=args.random_output_len,
             random_sample=True,
         )
+    elif args.dataset_name == "wyze":
+        input_requests = sample_wyze_requests(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            fixed_output_len=args.wyze_output_len,
+            token_per_frame = args.wyze_token_per_frame,
+            max_width = args.wyze_max_width,
+            max_height = args.wyze_max_height,
+            datatype = args.wyze_dataset_type,
+            max_frames = args.wyze_max_frames,
+        )
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
     return input_requests
@@ -756,6 +767,188 @@ def sample_mmmu_requests(
             print(f"Error processing example {i}: {e}")
 
     print(f"\nCreated {len(filtered_dataset)} MMMU prompts")
+    return filtered_dataset
+
+def sample_wyze_requests(
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+    token_per_frame: int,
+    fixed_output_len: int = 128,    
+    max_width: int = 1024,
+    max_height: int = 720,
+    datatype: str = "baby",
+    max_frames: int = 40,
+) -> List[DatasetRow]:
+    """
+    Sample requests from the MMMU dataset using HuggingFace datasets.
+
+    Args:
+        num_requests: Number of requests to sample.
+        tokenizer: Tokenizer to use for token counting.
+        fixed_output_len: If provided, use this fixed output length for all requests.
+        random_sample: Whether to randomly sample or take the first N.
+
+    Returns:
+        List of tuples (prompt, prompt_token_len, output_token_len).
+    """
+    try:
+        import base64
+        import io
+        import ast
+        import cv2
+        import pandas as pd
+        from decord import VideoReader
+
+    except ImportError:
+        raise ImportError("Please install cv2 and pandas: pip install opencv-python, pandas")
+
+    def _resize(img: np.ndarray, max_width, max_height) -> np.ndarray:
+        """Return a version of *img* whose dimensions do not exceed MAX_WIDTH×MAX_HEIGHT."""
+        h, w = img.shape[:2]
+        scale = min(1.0, max_width / w, max_height / h)
+        if scale < 1.0:
+            new_w, new_h = int(w * scale), int(h * scale)
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            return resized
+        return img
+
+    def parse_candidates(cell: str, row_idx: int):
+        """
+        Return a Python list parsed from a TSV cell that *should* contain a list.
+        Tries JSON first, then ast.literal_eval.  On failure returns None and logs.
+        """
+        # Empty / NaN → just return as‑is
+        if pd.isna(cell):                       # handles NaN, None, ''
+            return cell
+
+        # 1️⃣ Try strict JSON (double‑quoted, safest)
+        try:
+            return json.loads(cell)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # 2️⃣ Fall back to literal_eval (accepts single quotes, tuples, etc.)
+        try:
+            return ast.literal_eval(cell)
+        except (SyntaxError, ValueError):
+            print("Row %d: could not parse candidates: %r", row_idx, cell)
+            return None            # or [] / cell – whatever makes sense for you
+
+    def sample_frames(
+        video_path: Path,
+        max_frames: int = 40,
+        max_width: int = 1024,
+        max_height: int = 720,
+    ) -> List[dict]:
+        try:
+            vr = VideoReader(str(video_path))
+            total_frames = len(vr)
+            
+            if total_frames == 0:
+                raise FileNotFoundError("No frames found in %s", video_path)
+                
+        except Exception as e:
+            raise FileExistsError("Could not open %s: %s", video_path, e)
+
+        frames = []
+        for idx in range(min(max_frames, total_frames)):
+            frame = vr[idx]
+            img_resized = _resize(frame, max_width, max_height)
+            img_bgr = cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR)
+            _, buf = cv2.imencode(".jpg", img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            b64 = base64.b64encode(buf).decode("utf-8")
+            
+            frames.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            })
+        return frames
+
+    # =======================================================
+
+    print("Loading Wyze dataset from Local...")
+
+    DATA_PATH = args.dataset_path / "validated_benchmarks" / f"wyze_{datatype}_mcq.tsv"
+    VIDEO_DIR = args.dataset_path / "videos" / datatype
+    CHOICE_LETTERS = "ABCDE"  # expected answer tokens
+    SYSTEM_MSG = (
+        f"You are an expert at answering multiple‑choice questions about {datatype}-cam "
+        "videos."
+    )
+    wyze_dataset = pd.read_csv(DATA_PATH, sep="\t")
+
+    # Sample from the dataset
+    if len(wyze_dataset) > num_requests:
+        sample_dataset = wyze_dataset.head(num_requests)
+    else:
+        print(f"Dataset has less than {num_requests} examples, using all examples")
+        sample_dataset = wyze_dataset
+    if sample_dataset["candidates"].dtype == object:
+        sample_dataset["candidates"] = [
+            parse_candidates(cell, idx) for idx, cell in enumerate(sample_dataset["candidates"])
+        ]
+    print(f"Selected {len(sample_dataset)} examples for benchmarking")
+
+    # Create prompts
+    filtered_dataset = []
+
+    for i, example in enumerate(sample_dataset):
+        try:
+            row = sample_dataset.iloc[i]
+            vid_path = VIDEO_DIR / row["filename"]
+
+            frames = sample_frames(vid_path,
+                                   max_frames=max_frames,
+                                   max_width=max_width,
+                                   max_height=max_height)
+
+            # Extract the question
+            question = row["question"]
+            choices = row["candidates"]
+            lettered = "\n".join(f"{CHOICE_LETTERS[i]}. {c}" for i, c in enumerate(choices))
+            user_prompt = (
+                f"{question}\n\n"
+                f"Please choose the single best answer and respond **ONLY** "
+                f"with its letter (A-D).\n\n{lettered}"
+            )
+            messages = [
+                {"role": "system", "content": SYSTEM_MSG},
+                {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
+            ]
+
+            # Create the prompt with image, question
+            prompt_no_image = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            prompt_token_ids = tokenizer.encode(prompt_no_image)
+
+            messages[1]["content"].extend(frames)
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+            )
+
+            # Calculate token lengths
+            # Note: This is approximate since we're not rendering the actual image tokens
+            prompt_len = (
+                len(prompt_token_ids) + len(frames) * token_per_frame
+            )  # Add estimate for image tokens
+
+            output_len = fixed_output_len if fixed_output_len is not None else 256
+
+            filtered_dataset.append(
+                DatasetRow(
+                    prompt=prompt, prompt_len=prompt_len, output_len=output_len
+                )
+            )
+
+        except Exception as e:
+            print(f"Error processing example {i}: {e}")
+
+    print(f"\nCreated {len(filtered_dataset)} Wyze prompts")
     return filtered_dataset
 
 
@@ -1667,7 +1860,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "random", "random-ids", "generated-shared-prefix", "mmmu"],
+        choices=["sharegpt", "random", "random-ids", "generated-shared-prefix", "mmmu", "wyze"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -1845,5 +2038,44 @@ if __name__ == "__main__":
         default=256,
         help="Target length in tokens for outputs in generated-shared-prefix dataset",
     )
+
+    parser.add_argument(
+        "--wyze-dataset-type",
+        type=str,
+        default="baby",
+        choices=["baby", "insight", "pet", "senior", "temporal", "vehicle"],
+        help="Type of dataset to evaluate"
+    )
+    group.add_argument(
+        "--wyze-max-frames",
+        type=int,
+        default=40,
+        help="Max number of frames in each Wyze dataset request",
+    )
+    group.add_argument(
+        "--wyze-max-height",
+        type=int,
+        default=720,
+        help="Maximum frame height ",
+    )
+    group.add_argument(
+        "--wyze-max-width",
+        type=int,
+        default=1280,
+        help="Maximum frame weight",
+    )
+    group.add_argument(
+        "--wyze-token-per-frame",
+        type=int,
+        default=None,
+        help="Num of token per frame. Needed for cal input throughput",
+    )
+    group.add_argument(
+        "--wyze-output-len",
+        type=int,
+        default=128,
+        help="Target length in tokens for outputs in wyze dataset",
+    )
+
     args = parser.parse_args()
     run_benchmark(args)
