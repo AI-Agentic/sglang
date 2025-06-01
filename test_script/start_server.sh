@@ -1,10 +1,19 @@
 
 export TORCHINDUCTOR_CACHE_DIR=~/.triton
-CUDA_VISIBLE_DEVICES=4 python3 -m sglang.launch_server \
+
+
+CUDA_VISIBLE_DEVICES=4,6 python3 -m sglang.launch_server \
     --model-path OpenGVLab/InternVL3-1B \
     --chat-template internvl-2-5 \
-    --mem-fraction-static 0.2 \
-    --port 23333
+    --dp-size 2 \
+    --mem-fraction-static 0.9 \
+    --port 31231
+
+# CUDA_VISIBLE_DEVICES=4 python3 -m sglang.launch_server \
+#     --model-path OpenGVLab/InternVL3-1B \
+#     --chat-template internvl-2-5 \
+#     --mem-fraction-static 0.2 \
+#     --port 23333
     # --token-pruning-alg visionzip \
     # --token-pruning-ratio 0.3 \
     # --debug-token-pruning \
