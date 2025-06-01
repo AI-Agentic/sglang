@@ -2,51 +2,20 @@
 # File: setup.py
 # ─────────────────────────────────────────────────────────────────────────────
 
-from setuptools import setup, find_packages
-from Cython.Build import cythonize
 import os
 import sysconfig
+from setuptools import setup, find_packages, Extension, find_namespace_packages
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.build_ext import build_ext as _build_ext
+from Cython.Build import cythonize
 import importlib.machinery
 
 # ----------------------------------------------------------------------
-# 1. collect_modules: walk through base_dir and collect all .py files
-#    (excluding __init__.py), converting them to dotted module names.
-#    Skip anything under the "test" subdirectory entirely.
-# ----------------------------------------------------------------------
-def collect_modules(base_dir: str):
-    modules = []
-    for root, dirs, files in os.walk(base_dir):
-        # If we're inside a test directory, skip it altogether
-        if os.path.relpath(root, base_dir).startswith("test"):
-            continue
-
-        for file in files:
-            if not file.endswith(".py") or file == "__init__.py":
-                continue
-            module_path = os.path.join(root, file)
-            # Remove only the trailing .py extension
-            no_ext, _ = os.path.splitext(module_path)
-            # Convert file path to dotted module name
-            module_name = no_ext.replace(os.sep, ".")
-            modules.append(module_name)
-    return modules
-
-# ----------------------------------------------------------------------
-# 2. Generate all candidate .py file paths from the collected module names
+# 1. Explicitly list any exact file paths (relative to project root)
+#    that we want to exclude from Cython compilation.
 # ----------------------------------------------------------------------
 base_dir = "sglang"
-all_exts = [
-    module.replace(".", os.sep) + ".py"
-    for module in collect_modules(base_dir)
-]
 
-# ----------------------------------------------------------------------
-# 3. Define a set of paths that should NOT be compiled into .so.
-#    All files in tests are effectively excluded by collect_modules already,
-#    but keep this as a safety net for any extra test files.
-# ----------------------------------------------------------------------
 exclude_list = {
     os.path.join(base_dir, "srt", "distributed", "parallel_state.py"),
     os.path.join(base_dir, "srt", "distributed", "device_communicators", "pynccl_wrapper.py"),
@@ -60,102 +29,68 @@ exclude_list = {
     os.path.join(base_dir, "test", "test_utils.py")
 }
 
-# ----------------------------------------------------------------------
-# 4. Build the list of extensions to compile via Cython, 
-#    excluding those in exclude_list.
-# ----------------------------------------------------------------------
-extensions = [
-    ext
-    for ext in all_exts
-    if ext not in exclude_list
-]
 
-print("=== Extensions to compile (Cython) ===")
-for e in extensions:
-    print("   ", e)
-print("======================================")
+extensions = []      # Will hold Cython Extension objects for modules to compile
+raw_py_files = []
 
-# ----------------------------------------------------------------------
-# 5. CustomBuildPy: override find_package_modules so that:
-#    - if a .py file has already been compiled into a .so, skip copying the .py.
-#    - __init__.py is always preserved.
-#    - skip any .c files entirely (we only want the .so).
-# ----------------------------------------------------------------------
-class CustomBuildPy(_build_py):
-    def find_package_modules(self, package, package_dir):
-        ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
-        modules = super().find_package_modules(package, package_dir)
-        filtered_modules = []
+for root, _, files in os.walk(base_dir):  # Recurse through all subdirs :contentReference[oaicite:2]{index=2}
+    for fname in files:
+        if not fname.endswith(".py"):
+            continue  # Skip non-Python files :contentReference[oaicite:3]{index=3}
 
-        for root, _, files in os.walk(package_dir):
-            # Skip anything under "test" directories
-            if os.path.relpath(root, package_dir).startswith("test"):
-                continue
+        full_path = os.path.join(root, fname)
 
-            for file in files:
-                # Skip .c files completely
-                if file.endswith(".c"):
-                    continue
+        if fname == "__init__.py":
+            raw_py_files.append(full_path)
+            continue  # Always copy __init__.py as source, never compile :contentReference[oaicite:4]{index=4}
 
-                if not file.endswith(".py"):
-                    continue
+        if full_path in exclude_list:
+            raw_py_files.append(full_path)
+            continue  # Copy excluded files as source, never compile :contentReference[oaicite:5]{index=5}
 
-                module_path = os.path.join(root, file)
-                module_name = os.path.relpath(module_path, package_dir).replace(".py", "")
+        # Otherwise, register this .py as a Cython extension to compile to .so
+        rel_path = os.path.relpath(full_path, base_dir)
+        module_name = rel_path[:-3].replace(os.path.sep, ".")  # e.g. "sglang.subpkg.module" :contentReference[oaicite:6]{index=6}
 
-                # Always include __init__.py
-                if file == "__init__.py":
-                    filtered_modules.append((package, module_name, module_path))
-                    continue
+        ext = Extension(
+            name=module_name,
+            sources=[full_path],
+        )
+        extensions.append(ext) 
 
-                # If a corresponding .so exists, skip copying the .py
-                compiled_path = os.path.splitext(module_path)[0] + ext_suffix
-                if os.path.exists(compiled_path):
-                    continue
 
-                # Otherwise, keep this .py module
-                filtered_modules.append((package, module_name, module_path))
+ext_modules = cythonize(
+    extensions,
+    compiler_directives={"language_level": "3"},  # Enforce Python 3 syntax :contentReference[oaicite:8]{index=8}
+)
 
-        return filtered_modules
+package_data = {}
+for full_path in raw_py_files:
+    rel_path = os.path.relpath(full_path, base_dir)  # e.g. "sglang/srt/utils.py"
+    dir_name, fname = os.path.split(rel_path)  # dir_name="sglang/srt", fname="utils.py"
+    pkg_name = dir_name.replace(os.path.sep, ".")  # e.g. "sglang.srt" :contentReference[oaicite:9]{index=9}
+
+    if pkg_name not in package_data:
+        package_data[pkg_name] = []
+    package_data[pkg_name].append(fname)  # Only store the filename, not full path :contentReference[oaicite:10]{index=10}
+
 
 # ----------------------------------------------------------------------
-# 6. CustomBuildExt: override get_ext_filename to remove the
-#    ".cpython-310-...-x86_64-linux-gnu.so" suffix, leaving just ".so".
-# ----------------------------------------------------------------------
-class CustomBuildExt(_build_ext):
-    def get_ext_filename(self, fullname):
-        # fullname might be "sglang.api"
-        fname = super().get_ext_filename(fullname)
-        # Example: "sglang/api.cpython-310-x86_64-linux-gnu.so"
-        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
-            if fname.endswith(suffix):
-                # Strip off the long suffix and append ".so"
-                base = fname[: -len(suffix)]
-                return base + ".so"
-        return fname
-
-# ----------------------------------------------------------------------
-# 7. Call setup()
-#    - Exclude the "sglang.test" package so nothing under test/
-#      is packaged in the wheel.
+# 6. Call setup(), using cythonize() on our Extension list,
+#    and hooking in our custom commands.
 # ----------------------------------------------------------------------
 setup(
     name="sglang",
     version="0.4.6.post5",
-    python_requires=">=3.10,<3.11",       # Only support Python 3.10
-    # Exclude all test packages
-    packages=find_packages(exclude=["sglang.test", "sglang.test.*"]),
-    ext_modules=cythonize(
-        extensions,
-        compiler_directives={"language_level": "3"},
-        build_dir="build/cython",          # Place all generated .c files under build/cython/
-    ),
+    python_requires=">=3.10,<3.11",
+    packages=find_namespace_packages(include=["sglang", "sglang.*"]),
+    ext_modules=ext_modules,
+    include_package_data=True,
+    package_data=package_data, 
+    exclude_package_data={ '': ['*.py'] }, 
     zip_safe=False,
-    cmdclass={
-        "build_py": CustomBuildPy,
-        "build_ext": CustomBuildExt,
-    },
 )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 
