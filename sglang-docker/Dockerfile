@@ -30,6 +30,7 @@ RUN pyarmor reg /tmp/pyarmor-license.zip
 
 # 1. Obfuscate
 RUN pyarmor gen -O /tmp/obf -r python/sglang
+RUN pyarmor gen runtime -O /tmp/obf/sglang
 
 # 2. Copy the obfuscated files over the originals
 RUN cp -a /tmp/obf/sglang/. python/sglang/
