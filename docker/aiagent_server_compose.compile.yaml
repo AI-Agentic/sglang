@@ -2,11 +2,11 @@ version: '3.9'
 
 services:
   aiagent-sglang:
-    image: aiagent-sglang:latest
+    image: aiagent-sglang:compile
     gpus: all
     # -m sglang_router.launch_server
     command: >
-      python3 sglang/sgl-router/py_src/sglang_router/launch_server.py
+      python3 -m sglang_router.launch_server
       --host 0.0.0.0
       --model-path OpenGVLab/InternVL3-8B
       --dp-size 4

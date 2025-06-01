@@ -1,3 +1,5 @@
+# This is a version of dockerfile for building image from source code
+
 ARG CUDA_VERSION=12.4.1
 
 FROM nvcr.io/nvidia/tritonserver:24.04-py3-min

@@ -11,8 +11,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
   && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
   && apt update -y \
   && apt install software-properties-common -y \
-  && apt install python3.10 python3-pip -y \
-  && apt install curl git sudo libibverbs-dev -y \
+  && apt install python3.10 python3-pip -y 
+RUN apt install curl git sudo libibverbs-dev -y \
   && apt install rdma-core infiniband-diags openssh-server perftest -y \
   && python3 --version \
   && python3 -m pip --version \
@@ -39,20 +39,22 @@ RUN python3 -m pip install --upgrade pip setuptools wheel html5lib six \
   else \
   echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1; \
   fi \
-  && python3 -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu${CUINDEX}
+  && python3 -m pip uninstall -y torch || true \
+  && python3 -m pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu${CUINDEX}
 # && cd sglang \
-# TODO
 
+COPY requirements.txt .
+RUN python3 -m pip install --no-cache-dir -r requirements.txt --find-links https://flashinfer.ai/whl/cu${CUINDEX}/torch2.6/flashinfer-python
 COPY sglang-0.4.6.post5-py3-none-any.whl .
-RUN python3 -m pip --no-cache-dir install sglang-0.4.6.post5-py3-none-any.whl \
-  --find-links https://flashinfer.ai/whl/cu${CUINDEX}/torch2.6/flashinfer-python \
+RUN python3 -m pip --no-cache-dir install sglang-0.4.6.post5-py3-none-any.whl --find-links https://flashinfer.ai/whl/cu${CUINDEX}/torch2.6/flashinfer-python \
   && if [ "$CUDA_VERSION" = "12.8.1" ]; then \
   python3 -m pip install nvidia-nccl-cu12==2.26.2.post1 --force-reinstall --no-deps; \
   fi \
-  # && python3 -m pip install sglang_router \
-  && python3 -m pip install vllm
+  && python3 -m pip install vllm orjson --no-deps \
+  && python3 -m pip install sglang-router --no-deps \
+  && python3 -m pip install sgl-kernel --force-reinstall --no-deps
 
-COPY sglang_router-0.1.4-cp310-cp310-linux_x86_64.whl .
-RUN python3 -m pip install sglang_router-0.1.4-cp310-cp310-linux_x86_64.whl
+# COPY sglang_router-0.1.4-cp310-cp310-linux_x86_64.whl .
+# RUN python3 -m pip install sglang_router-0.1.4-cp310-cp310-linux_x86_64.whl
 
 ENV DEBIAN_FRONTEND=interactive
