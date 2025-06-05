@@ -1,5 +1,5 @@
-python3 -m sglang.bench_serving \
-    --backend sglang-oai \
-    --num-prompt 1000 \
-    --dataset-name mmmu \
-    --port 31231
+cd benchmark/mmmu
+
+python3 bench_sglang.py \
+    --concurrency 64 \
+    --port 31231 \

@@ -13,10 +13,13 @@ import argparse
 import asyncio
 import sys
 import time
+import base64
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
+import cv2
+import numpy as np
 import aiohttp
 import openai
 from data_utils import save_json
@@ -81,6 +84,61 @@ async def process_sample(
     image = sample["image"]
     assert image is not None
     image_path = sample["image_path"]
+
+
+    def _pad_to_nearest_patch_size(img: np.ndarray, patch_size = 448) -> np.ndarray:
+        h, w = img.shape[:2]
+        
+        # 计算新的宽度和高度（向上取整为 patch_size 的倍数）
+        new_w = ((w + patch_size - 1) // patch_size) * patch_size
+        new_h = ((h + patch_size - 1) // patch_size) * patch_size
+        # 计算需要在每侧填充的像素数
+        top = 0 
+        bottom = (new_h - h)
+        left = 0
+        right = (new_w - w)
+        
+        # 改为使用纯白色填充
+        border_value = [255, 255, 255]  # 纯白色
+        
+        # 进行填充操作
+        padded_img = cv2.copyMakeBorder(
+            img,
+            top=top,
+            bottom=bottom,
+            left=left,
+            right=right,
+            borderType=cv2.BORDER_CONSTANT,
+            value=border_value
+        )
+        
+        return padded_img
+
+    def concat_images(images: List[np.ndarray], height_concat = True) -> np.ndarray:
+
+        """
+        Concatenate a list of images either vertically or horizontally.
+        
+        :param images: List of images (numpy arrays) to concatenate.
+        :param height_concat: If True, concatenate vertically; if False, concatenate horizontally.
+        :return: Concatenated image as a numpy array.
+        """
+        if not images:
+            return np.array([])
+
+        if height_concat:
+            return cv2.vconcat(images)
+        else:
+            return cv2.hconcat(images)
+
+    def encode_image(image_path):
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+
+    # ==================================
+
+    base64_image = encode_image(image_path)
+
     response = await client.chat.completions.create(
         model="default",
         messages=[
@@ -88,7 +146,11 @@ async def process_sample(
                 "role": "user",
                 "content": [
                     {"type": "text", "text": prefix},
-                    {"type": "image_url", "image_url": {"url": image_path}},
+                    # {"type": "image_url", "image_url": {"url": image_path}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
                     {"type": "text", "text": suffix},
                 ],
             }
@@ -148,6 +210,7 @@ async def eval_mmmu(args) -> None:
             print("Profiler stopped")
 
     print(f"Benchmark time: {time.perf_counter() - start}")
+    print(f"Requests per second: {len(samples) / (time.perf_counter() - start)} req/s")
     args.output_path = f"./val_sglang.json"
     save_json(args.output_path, out_samples)
     eval_result(model_answer_path=args.output_path, answer_dict=answer_dict)

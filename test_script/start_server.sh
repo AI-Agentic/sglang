@@ -1,12 +1,12 @@
 
 export TORCHINDUCTOR_CACHE_DIR=~/.triton
+export SGLANG_TORCH_PROFILER_DIR=.
 
-
-CUDA_VISIBLE_DEVICES=4,6 python3 -m sglang.launch_server \
-    --model-path OpenGVLab/InternVL3-1B \
+CUDA_VISIBLE_DEVICES=6,7 python3 -m sglang.launch_server \
+    --model-path OpenGVLab/InternVL3-8B \
     --chat-template internvl-2-5 \
     --dp-size 2 \
-    --mem-fraction-static 0.9 \
+    --mem-fraction-static 0.7 \
     --port 31231
 
 # CUDA_VISIBLE_DEVICES=4 python3 -m sglang.launch_server \
