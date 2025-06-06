@@ -332,8 +332,18 @@ def _adjust_embedding_length(
     mask: torch.Tensor,
     logger,
 ) -> torch.Tensor:
+    
     num_mm_tokens_in_embedding = embedding.shape[0]
-    num_mm_tokens_in_input_ids = mask.sum().item()
+    num_mm_tokens_in_input_ids = mask.sum()     
+    if embedding.dim() == 2:
+        embedding = embedding[-num_mm_tokens_in_input_ids:, :]
+    else:
+        num_multimodal = num_mm_tokens_in_input_ids // embedding.shape[0]
+        embedding = embedding[-num_multimodal:, :]
+
+    return embedding
+
+    #.item()
     if num_mm_tokens_in_input_ids != num_mm_tokens_in_embedding:
         logger.warning(
             f"Number of tokens in multimodal embedding does not match those in the input text. "
@@ -341,11 +351,11 @@ def _adjust_embedding_length(
             f"tokens from multimodal embeddings."
         )
         if num_mm_tokens_in_input_ids < num_mm_tokens_in_embedding:
-            chunked_prefill_size = global_server_args_dict["chunked_prefill_size"]
-            if chunked_prefill_size != -1:
-                logger.warning(
-                    "You may want to avoid this issue by raising `chunked_prefill_size`, or disabling chunked prefill"
-                )
+            # chunked_prefill_size = global_server_args_dict["chunked_prefill_size"]
+            # if chunked_prefill_size != -1:
+            #     logger.warning(
+            #         "You may want to avoid this issue by raising `chunked_prefill_size`, or disabling chunked prefill"
+            #     )
             # extract from the end: this is a compromise
             if embedding.dim() == 2:
                 embedding = embedding[-num_mm_tokens_in_input_ids:, :]

@@ -69,7 +69,7 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
 
     @staticmethod
     def dynamic_preprocess(
-        image, min_num=1, max_num=12, image_size=448, use_thumbnail=False
+        image, min_num=1, max_num=32, image_size=448, use_thumbnail=False
     ):
 
         def find_closest_aspect_ratio(
@@ -185,7 +185,7 @@ class InternVLImageProcessor(BaseMultimodalProcessor):
             discard_alpha_channel=True,
         )
 
-        def process_image_internvl(image, input_size=448, max_num=12):
+        def process_image_internvl(image, input_size=448, max_num=32):
             transform = InternVLImageProcessor.build_transform(input_size=input_size)
             images = InternVLImageProcessor.dynamic_preprocess(
                 image, image_size=input_size, use_thumbnail=True, max_num=max_num
